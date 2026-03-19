@@ -20,6 +20,6 @@ if [ ! -d "./norgesgruppen_venv" ]; then
 fi
 source ./norgesgruppen_venv/bin/activate
 
-pip install torch torchvision "transformers>=4.56.0" albumentations "pillow==11.3.0" torchmetrics tqdm
+pip install torch torchvision "transformers>=4.56.0" albumentations "pillow==11.3.0" torchmetrics tqdm pycocotools
 
 python "./dinov3_coco_detection_notebook.py"
