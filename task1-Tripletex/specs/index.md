@@ -1,9 +1,5 @@
 # Tripletex API — Endpoint Index
 
-Lightweight lookup table of every API endpoint.
-Use this to identify which endpoints are needed for a task,
-then pull detailed schemas from registry.json.
-
 | Method | Path | Summary |
 |--------|------|---------|
 | GET | `/accountantDashboard/news` | Get public news articles |
@@ -91,8 +87,8 @@ then pull detailed schemas from registry.json.
 | GET | `/crm/prospect` | Find prospects corresponding with sent data. |
 | GET | `/crm/prospect/{id}` | Get prospect by ID. |
 | GET | `/currency` | Find currencies corresponding with sent data. |
-| GET | `/currency/{fromCurrencyID}/exchangeRate` | Returns the amount in the company currency, where the input amount is in fromCurrency, using the newest exchange rate... |
-| GET | `/currency/{fromCurrencyID}/{toCurrencyID}/exchangeRate` | Returns the amount in the specified currency, where the input amount is in fromCurrency, using the newest exchange ra... |
+| GET | `/currency/{fromCurrencyID}/exchangeRate` | Returns the amount in the company currency, where the input amount is in fromCurrency, using the newest exchange rate available for the given date |
+| GET | `/currency/{fromCurrencyID}/{toCurrencyID}/exchangeRate` | Returns the amount in the specified currency, where the input amount is in fromCurrency, using the newest exchange rate available for the given date |
 | GET | `/currency/{id}` | Get currency by ID. |
 | GET | `/currency/{id}/rate` | Find currency exchange rate corresponding with sent data. |
 | GET | `/customer` | Find customers corresponding with sent data. |
@@ -253,8 +249,8 @@ then pull detailed schemas from registry.json.
 | GET | `/invoice/paymentType` | Find payment type corresponding with sent data. |
 | GET | `/invoice/paymentType/{id}` | Get payment type by ID. |
 | GET | `/invoice/{id}` | Get invoice by ID. |
-| PUT | `/invoice/{id}/:createCreditNote` | Creates a new Invoice representing a credit memo that nullifies the given invoice. Updates this invoice and any pre-e... |
-| PUT | `/invoice/{id}/:createReminder` | Create invoice reminder and sends it by the given dispatch type. Supports the reminder types SOFT_REMINDER, REMINDER ... |
+| PUT | `/invoice/{id}/:createCreditNote` | Creates a new Invoice representing a credit memo that nullifies the given invoice. Updates this invoice and any pre-existing inverse invoice. |
+| PUT | `/invoice/{id}/:createReminder` | Create invoice reminder and sends it by the given dispatch type. Supports the reminder types SOFT_REMINDER, REMINDER and NOTICE_OF_DEBT_COLLECTION. DispatchType NETS_PRINT must have type NOTICE_OF_... |
 | PUT | `/invoice/{id}/:payment` | Update invoice. The invoice is updated with payment information. The amount is in the invoice’s currency. |
 | PUT | `/invoice/{id}/:send` | Send invoice by ID and sendType. Optionally override email recipient. |
 | GET | `/invoice/{invoiceId}/pdf` | Get invoice document by invoice ID. |
@@ -297,39 +293,39 @@ then pull detailed schemas from registry.json.
 | PUT | `/ledger/posting/:closePostings` | Close postings. |
 | GET | `/ledger/posting/openPost` | Find open posts corresponding with sent data. |
 | GET | `/ledger/posting/{id}` | Find postings by ID. |
-| GET | `/ledger/postingByDate` | Get postings by date range with pagination. Returns the same PostingDTO as /ledger/posting. Simplified endpoint for b... |
-| GET | `/ledger/postingRules` | Get posting rules for current company.  The posting rules defined which accounts from the chart of accounts that are ... |
+| GET | `/ledger/postingByDate` | Get postings by date range with pagination. Returns the same PostingDTO as /ledger/posting. Simplified endpoint for better performance. Fields and Changes are not supported. Token must have access ... |
+| GET | `/ledger/postingRules` | Get posting rules for current company.  The posting rules defined which accounts from the chart of accounts that are used for postings when the system creates postings. |
 | GET | `/ledger/vatSettings` | Get VAT settings for the logged in company. |
 | PUT | `/ledger/vatSettings` | Update VAT settings for the logged in company. |
 | GET | `/ledger/vatType` | Find vat types corresponding with sent data. |
 | PUT | `/ledger/vatType/createRelativeVatType` | Create a new relative VAT Type. These are used if the company has 'forholdsmessig fradrag for inngående MVA'. |
 | GET | `/ledger/vatType/{id}` | Get vat type by ID. |
 | GET | `/ledger/voucher` | Find vouchers corresponding with sent data. |
-| POST | `/ledger/voucher` | Add new voucher. IMPORTANT: Also creates postings. Only the gross amounts will be used. Amounts should be rounded to ... |
+| POST | `/ledger/voucher` | Add new voucher. IMPORTANT: Also creates postings. Only the gross amounts will be used. Amounts should be rounded to 2 decimals. |
 | GET | `/ledger/voucher/>externalVoucherNumber` | Find vouchers based on the external voucher number. |
 | GET | `/ledger/voucher/>nonPosted` | Find non-posted vouchers. |
 | GET | `/ledger/voucher/>voucherReception` | Find vouchers in voucher reception. |
 | PUT | `/ledger/voucher/historical/:closePostings` | [BETA] Close postings. |
 | PUT | `/ledger/voucher/historical/:reverseHistoricalVouchers` | [BETA] Deletes all historical vouchers. Requires the "All vouchers" and "Advanced Voucher" permissions. |
-| POST | `/ledger/voucher/historical/employee` | [BETA] Create one employee, based on import from external system. Validation is less strict, ie. employee department ... |
-| POST | `/ledger/voucher/historical/historical` | API endpoint for creating historical vouchers. These are vouchers created outside Tripletex, and should be from close... |
-| POST | `/ledger/voucher/historical/{voucherId}/attachment` | Upload attachment to voucher. If the voucher already has an attachment the content will be appended to the existing a... |
-| POST | `/ledger/voucher/importDocument` | Upload a document to create one or more vouchers. Valid document formats are PDF, PNG, JPEG and TIFF. EHF/XML is poss... |
+| POST | `/ledger/voucher/historical/employee` | [BETA] Create one employee, based on import from external system. Validation is less strict, ie. employee department isn't required. |
+| POST | `/ledger/voucher/historical/historical` | API endpoint for creating historical vouchers. These are vouchers created outside Tripletex, and should be from closed accounting years. The intended usage is to get access to historical transcatio... |
+| POST | `/ledger/voucher/historical/{voucherId}/attachment` | Upload attachment to voucher. If the voucher already has an attachment the content will be appended to the existing attachment as new PDF page(s). Valid document formats are PDF, PNG, JPEG and TIFF... |
+| POST | `/ledger/voucher/importDocument` | Upload a document to create one or more vouchers. Valid document formats are PDF, PNG, JPEG and TIFF. EHF/XML is possible with agreement with Tripletex. Send as multipart form. |
 | POST | `/ledger/voucher/importGbat10` | Import GBAT10. Send as multipart form. |
 | PUT | `/ledger/voucher/list` | Update multiple vouchers. Postings with guiRow==0 will be deleted and regenerated. |
 | DELETE | `/ledger/voucher/openingBalance` | [BETA] Delete the opening balance. The correction voucher will also be deleted |
 | GET | `/ledger/voucher/openingBalance` | [BETA] Get the voucher for the opening balance. |
-| POST | `/ledger/voucher/openingBalance` | [BETA] Add an opening balance on the given date.  All movements before this date will be 'zeroed out' in a separate c... |
+| POST | `/ledger/voucher/openingBalance` | [BETA] Add an opening balance on the given date.  All movements before this date will be 'zeroed out' in a separate correction voucher. The opening balance must have the first day of a month as the... |
 | GET | `/ledger/voucher/openingBalance/>correctionVoucher` | [BETA] Get the correction voucher for the opening balance. |
 | DELETE | `/ledger/voucher/{id}` | Delete voucher by ID. |
 | GET | `/ledger/voucher/{id}` | Get voucher by ID. |
 | PUT | `/ledger/voucher/{id}` | Update voucher. Postings with guiRow==0 will be deleted and regenerated. |
-| PUT | `/ledger/voucher/{id}/:reverse` | Reverses the voucher, and returns the reversed voucher. Supports reversing most voucher types, except salary transact... |
+| PUT | `/ledger/voucher/{id}/:reverse` | Reverses the voucher, and returns the reversed voucher. Supports reversing most voucher types, except salary transactions. |
 | PUT | `/ledger/voucher/{id}/:sendToInbox` | Send voucher to inbox. |
 | PUT | `/ledger/voucher/{id}/:sendToLedger` | Send voucher to ledger. |
-| GET | `/ledger/voucher/{id}/options` | Returns a data structure containing meta information about operations that are available for this voucher. Currently ... |
+| GET | `/ledger/voucher/{id}/options` | Returns a data structure containing meta information about operations that are available for this voucher. Currently only implemented for DELETE: It is possible to check if the voucher is deletable. |
 | DELETE | `/ledger/voucher/{voucherId}/attachment` | Delete attachment. |
-| POST | `/ledger/voucher/{voucherId}/attachment` | Upload attachment to voucher. If the voucher already has an attachment the content will be appended to the existing a... |
+| POST | `/ledger/voucher/{voucherId}/attachment` | Upload attachment to voucher. If the voucher already has an attachment the content will be appended to the existing attachment as new PDF page(s). Valid document formats are PDF, PNG, JPEG and TIFF... |
 | GET | `/ledger/voucher/{voucherId}/pdf` | Get PDF representation of voucher by ID. |
 | POST | `/ledger/voucher/{voucherId}/pdf/{fileName}` | [DEPRECATED] Use POST ledger/voucher/{voucherId}/attachment instead. |
 | GET | `/ledger/voucherType` | Find voucher types corresponding with sent data. |
@@ -338,7 +334,7 @@ then pull detailed schemas from registry.json.
 | GET | `/municipality/query` | [BETA] Wildcard search. |
 | GET | `/order` | Find orders corresponding with sent data. |
 | POST | `/order` | Create order. |
-| PUT | `/order/:invoiceMultipleOrders` | [BETA] Charges a single customer invoice from multiple orders. The orders must be to the same customer, currency, due... |
+| PUT | `/order/:invoiceMultipleOrders` | [BETA] Charges a single customer invoice from multiple orders. The orders must be to the same customer, currency, due date, receiver email, attn. and smsNotificationNumber |
 | POST | `/order/list` | [BETA] Create multiple Orders with OrderLines. Max 100 at a time. |
 | GET | `/order/orderConfirmation/{orderId}/pdf` | Get PDF representation of order by ID. |
 | GET | `/order/orderGroup` | Find orderGroups corresponding with sent data. |
@@ -352,8 +348,8 @@ then pull detailed schemas from registry.json.
 | DELETE | `/order/orderline/{id}` | [BETA] Delete order line by ID. |
 | GET | `/order/orderline/{id}` | Get order line by ID. |
 | PUT | `/order/orderline/{id}` | [BETA] Put order line |
-| PUT | `/order/orderline/{id}/:pickLine` | [BETA] Pick order line. This is only available for customers who have Logistics and who activated the available inven... |
-| PUT | `/order/orderline/{id}/:unpickLine` | [BETA] Unpick order line.This is only available for customers who have Logistics and who activated the available inve... |
+| PUT | `/order/orderline/{id}/:pickLine` | [BETA] Pick order line. This is only available for customers who have Logistics and who activated the available inventory functionality. |
+| PUT | `/order/orderline/{id}/:unpickLine` | [BETA] Unpick order line.This is only available for customers who have Logistics and who activated the available inventory functionality. |
 | GET | `/order/packingNote/{orderId}/pdf` | Get PDF representation of packing note by ID. |
 | PUT | `/order/sendInvoicePreview/{orderId}` | Send Invoice Preview to customer by email. |
 | PUT | `/order/sendOrderConfirmation/{orderId}` | Send Order Confirmation to customer by email. |
@@ -361,7 +357,7 @@ then pull detailed schemas from registry.json.
 | DELETE | `/order/{id}` | Delete order. |
 | GET | `/order/{id}` | Get order by ID. |
 | PUT | `/order/{id}` | Update order. |
-| PUT | `/order/{id}/:approveSubscriptionInvoice` | To create a subscription invoice, first create a order with the subscription enabled, then approve it with this metho... |
+| PUT | `/order/{id}/:approveSubscriptionInvoice` | To create a subscription invoice, first create a order with the subscription enabled, then approve it with this method. This approves the order for subscription invoicing. |
 | PUT | `/order/{id}/:attach` | Attach document to specified order ID. |
 | PUT | `/order/{id}/:invoice` | Create new invoice or subscription invoice from order. |
 | PUT | `/order/{id}/:unApproveSubscriptionInvoice` | Unapproves the order for subscription invoicing. |
@@ -404,7 +400,7 @@ then pull detailed schemas from registry.json.
 | GET | `/product/productPrice` | Find prices for a product. Only available for Logistics Basic. |
 | GET | `/product/supplierProduct` | Find products corresponding with sent data. |
 | POST | `/product/supplierProduct` | Create new supplierProduct. |
-| POST | `/product/supplierProduct/getSupplierProductsByIds` | Find the products by ids. Method was added as a POST because GET request header has a maximum size that we can exceed... |
+| POST | `/product/supplierProduct/getSupplierProductsByIds` | Find the products by ids. Method was added as a POST because GET request header has a maximum size that we can exceed with customers that a lot of products. |
 | POST | `/product/supplierProduct/list` | Create list of new supplierProduct. |
 | PUT | `/product/supplierProduct/list` | Update a list of supplierProduct. |
 | DELETE | `/product/supplierProduct/{id}` | Delete supplierProduct. |
@@ -439,7 +435,7 @@ then pull detailed schemas from registry.json.
 | GET | `/project/controlForm/{id}` | [BETA] Get project control form by ID. |
 | GET | `/project/controlFormType` | [BETA] Get project control form types |
 | GET | `/project/controlFormType/{id}` | [BETA] Get project control form type by ID. |
-| PUT | `/project/dynamicControlForm/{id}/:copyFieldValuesFromLastEditedForm` | Into each section in the specified form that only has empty or default values, and copyFieldValuesByDefault set as tr... |
+| PUT | `/project/dynamicControlForm/{id}/:copyFieldValuesFromLastEditedForm` | Into each section in the specified form that only has empty or default values, and copyFieldValuesByDefault set as true in the form's template, copy field values from the equivalent section in the ... |
 | GET | `/project/hourlyRates` | Find project hourly rates corresponding with sent data. |
 | POST | `/project/hourlyRates` | Create a project hourly rate. |
 | DELETE | `/project/hourlyRates/deleteByProjectIds` | Delete project hourly rates by project id. |
@@ -513,7 +509,7 @@ then pull detailed schemas from registry.json.
 | PUT | `/purchaseOrder/deviation/{id}/:deliver` | Send deviations to approval. Only available for Logistics Basic. |
 | PUT | `/purchaseOrder/deviation/{id}/:undeliver` | Set status to Not delivered for deviations. Only available for Logistics Basic. |
 | GET | `/purchaseOrder/goodsReceipt` | Get goods receipt. Only available for Logistics Basic. |
-| POST | `/purchaseOrder/goodsReceipt` | Register goods receipt without an existing purchase order. When registration of several goods receipt, use /list for ... |
+| POST | `/purchaseOrder/goodsReceipt` | Register goods receipt without an existing purchase order. When registration of several goods receipt, use /list for better performance. Only available for Logistics Basic. |
 | DELETE | `/purchaseOrder/goodsReceipt/list` | Delete multiple goods receipts by ID. Only available for Logistics Basic. |
 | POST | `/purchaseOrder/goodsReceipt/list` | Register multiple goods receipts without an existing purchase order. Only available for Logistics Basic. |
 | DELETE | `/purchaseOrder/goodsReceipt/{id}` | Delete goods receipt by ID. Only available for Logistics Basic. |
@@ -521,9 +517,9 @@ then pull detailed schemas from registry.json.
 | PUT | `/purchaseOrder/goodsReceipt/{id}` | Update goods receipt. Only available for Logistics Basic. |
 | PUT | `/purchaseOrder/goodsReceipt/{id}/:confirm` | Confirm goods receipt. Only available for Logistics Basic. |
 | PUT | `/purchaseOrder/goodsReceipt/{id}/:receiveAndConfirm` | Receive all ordered products and approve goods receipt. Only available for Logistics Basic. |
-| PUT | `/purchaseOrder/goodsReceipt/{id}/:registerGoodsReceipt` | Register goods receipt. Quantity received on the products is set to the same as quantity ordered. To update the quant... |
+| PUT | `/purchaseOrder/goodsReceipt/{id}/:registerGoodsReceipt` | Register goods receipt. Quantity received on the products is set to the same as quantity ordered. To update the quantity received, use PUT /purchaseOrder/goodsReceiptLine/{id}. Only available for L... |
 | GET | `/purchaseOrder/goodsReceiptLine` | Find goods receipt lines for purchase order. Only available for Logistics Basic. |
-| POST | `/purchaseOrder/goodsReceiptLine` | Register new goods receipt; new product on an existing purchase order. When registration of several goods receipts, u... |
+| POST | `/purchaseOrder/goodsReceiptLine` | Register new goods receipt; new product on an existing purchase order. When registration of several goods receipts, use /list for better performance. Only available for Logistics Basic. |
 | DELETE | `/purchaseOrder/goodsReceiptLine/list` | Delete goods receipt lines by ID. Only available for Logistics Basic. |
 | POST | `/purchaseOrder/goodsReceiptLine/list` | Register multiple new goods receipts on an existing purchase order. Only available for Logistics Basic. |
 | PUT | `/purchaseOrder/goodsReceiptLine/list` | Update goods receipt lines on a goods receipt. Only available for Logistics Basic. |
@@ -554,7 +550,7 @@ then pull detailed schemas from registry.json.
 | GET | `/reminder` | Find reminders corresponding with sent data. |
 | GET | `/reminder/{id}` | Get reminder by ID. |
 | GET | `/reminder/{reminderId}/pdf` | Get reminder document by reminder ID. |
-| GET | `/resultbudget` | Find result budgets corresponding with sent data. Either specify the ids of the departments, projects, products or em... |
+| GET | `/resultbudget` | Find result budgets corresponding with sent data. Either specify the ids of the departments, projects, products or employees to return result budgets for, or use the boolean parameters includeAll**... |
 | GET | `/resultbudget/company` | Get result budget for company |
 | GET | `/resultbudget/department/{id}` | Get result budget associated with a departmentId |
 | GET | `/resultbudget/employee/{id}` | Get result budget associated with an employeeId |
@@ -630,7 +626,7 @@ then pull detailed schemas from registry.json.
 | GET | `/supplierInvoice/forApproval` | Get supplierInvoices for approval |
 | PUT | `/supplierInvoice/voucher/{id}/postings` | [BETA] Put debit postings. |
 | GET | `/supplierInvoice/{id}` | Get supplierInvoice by ID. |
-| POST | `/supplierInvoice/{invoiceId}/:addPayment` | Register payment, paymentType == 0 finds the last paymentType for this vendor.Use of this method requires setup done ... |
+| POST | `/supplierInvoice/{invoiceId}/:addPayment` | Register payment, paymentType == 0 finds the last paymentType for this vendor.Use of this method requires setup done by Tripletex. |
 | PUT | `/supplierInvoice/{invoiceId}/:addRecipient` | Add recipient to supplier invoices. |
 | PUT | `/supplierInvoice/{invoiceId}/:approve` | Approve supplier invoice. |
 | PUT | `/supplierInvoice/{invoiceId}/:changeDimension` | Change dimension on a supplier invoice. |
@@ -639,16 +635,16 @@ then pull detailed schemas from registry.json.
 | GET | `/supportDashboard/bankruptAndExcludedCustomers` | Returns the customers for support dashboard. |
 | GET | `/supportDashboard/export` | Export the customers table to a specific format |
 | GET | `/timesheet/allocated` | Find allocated hour entries corresponding with sent data. |
-| POST | `/timesheet/allocated` | Add new allocated hour entry. Only one entry per employee/date/activity/project combination is supported. Only holida... |
-| PUT | `/timesheet/allocated/:approveList` | Only for allocated hours on the company's internal holiday/vacation activity. Mark the allocated hour entry/entries a... |
-| PUT | `/timesheet/allocated/:unapproveList` | Only for allocated hours on the company's internal holiday/vacation activity. Mark the allocated hour entry/entries a... |
-| POST | `/timesheet/allocated/list` | Add new allocated hour entry. Multiple objects for several users can be sent in the same request. Only holiday/vacati... |
-| PUT | `/timesheet/allocated/list` | Update allocated hour entry. Multiple objects for different users can be sent in the same request. Note: Allocated ho... |
+| POST | `/timesheet/allocated` | Add new allocated hour entry. Only one entry per employee/date/activity/project combination is supported. Only holiday/vacation hours can receive comments. A notification will be sent to the entry'... |
+| PUT | `/timesheet/allocated/:approveList` | Only for allocated hours on the company's internal holiday/vacation activity. Mark the allocated hour entry/entries as approved. The hours will be copied to the time sheet if the relevant weeks/mon... |
+| PUT | `/timesheet/allocated/:unapproveList` | Only for allocated hours on the company's internal holiday/vacation activity. Mark the allocated hour entry/entries as unapproved. Notifications will be sent to the entries' employees if the entrie... |
+| POST | `/timesheet/allocated/list` | Add new allocated hour entry. Multiple objects for several users can be sent in the same request. Only holiday/vacation hours can receive comments. Notifications will be sent to the entries' employ... |
+| PUT | `/timesheet/allocated/list` | Update allocated hour entry. Multiple objects for different users can be sent in the same request. Note: Allocated hour entry object fields which are present but not set, or set to 0, will be nulle... |
 | DELETE | `/timesheet/allocated/{id}` | Delete allocated hour entry by ID. |
 | GET | `/timesheet/allocated/{id}` | Find allocated hour entry by ID. |
-| PUT | `/timesheet/allocated/{id}` | Update allocated hour entry by ID. Note: Allocated hour entry object fields which are present but not set, or set to ... |
-| PUT | `/timesheet/allocated/{id}/:approve` | Only for allocated hours on the company's internal holiday/vacation activity. Mark the allocated hour entry as approv... |
-| PUT | `/timesheet/allocated/{id}/:unapprove` | Only for allocated hours on the company's internal holiday/vacation activity. Mark the allocated hour entry as unappr... |
+| PUT | `/timesheet/allocated/{id}` | Update allocated hour entry by ID. Note: Allocated hour entry object fields which are present but not set, or set to 0, will be nulled. Only holiday/vacation hours can receive comments. A notificat... |
+| PUT | `/timesheet/allocated/{id}/:approve` | Only for allocated hours on the company's internal holiday/vacation activity. Mark the allocated hour entry as approved. The hours will be copied to the time sheet if the relevant week/month is not... |
+| PUT | `/timesheet/allocated/{id}/:unapprove` | Only for allocated hours on the company's internal holiday/vacation activity. Mark the allocated hour entry as unapproved. A notification will be sent to the entry's employee if the entry's approva... |
 | GET | `/timesheet/companyHoliday` | [BETA] Search for company holidays by id or year. |
 | POST | `/timesheet/companyHoliday` | [BETA] Create a company holiday |
 | DELETE | `/timesheet/companyHoliday/{id}` | [BETA] Delete a company holiday |
@@ -663,7 +659,7 @@ then pull detailed schemas from registry.json.
 | PUT | `/timesheet/entry/list` | Update timesheet entry. Multiple objects for different users can be sent in the same request. |
 | DELETE | `/timesheet/entry/{id}` | Delete timesheet entry by ID. |
 | GET | `/timesheet/entry/{id}` | Find timesheet entry by ID. |
-| PUT | `/timesheet/entry/{id}` | Update timesheet entry by ID. Note: Timesheet entry object fields which are present but not set, or set to 0, will be... |
+| PUT | `/timesheet/entry/{id}` | Update timesheet entry by ID. Note: Timesheet entry object fields which are present but not set, or set to 0, will be nulled. |
 | PUT | `/timesheet/month/:approve` | approve month(s).  If id is provided the other args are ignored |
 | PUT | `/timesheet/month/:complete` | complete month(s).  If id is provided the other args are ignored |
 | PUT | `/timesheet/month/:reopen` | reopen month(s).  If id is provided the other args are ignored |
@@ -780,7 +776,7 @@ then pull detailed schemas from registry.json.
 | GET | `/voucherInbox/inboxCount` | Get count of items in the Voucher Inbox |
 | GET | `/voucherMessage` | [BETA] Find voucherMessage (or a comment) put on a voucher by inputting voucher ids |
 | POST | `/voucherMessage` | [BETA] Post new voucherMessage. |
-| GET | `/voucherStatus` | Find voucherStatus corresponding with sent data. The voucherStatus is used to coordinate integration processes. Requi... |
+| GET | `/voucherStatus` | Find voucherStatus corresponding with sent data. The voucherStatus is used to coordinate integration processes. Requires setup done by Tripletex, currently supports debt collection. |
 | POST | `/voucherStatus` | Post new voucherStatus. |
 | GET | `/voucherStatus/{id}` | Get voucherStatus by ID. |
 | GET | `/yearEnd/enumType/businessActivityTypes` | Get business activity types |

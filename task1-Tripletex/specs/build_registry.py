@@ -1,17 +1,6 @@
 #!/usr/bin/env python3
 """
-build_registry.py — Generate index.md and registry.json from the Tripletex OpenAPI spec.
-
-Generates two files:
-
-1. index.md (The Index): markdown table of ALL endpoints (method, path, one-line summary).
-   
-2. registry.json (The Registry): structured JSON file keyed by "METHOD /path" (e.g. "POST /employee").
-   Each value contains the fully resolved request body schema (field names, types, formats, enums, nested objects)
-    and query parameters — everything needed to construct a valid API call without guessing.
-
-Usage:
-    python specs/build_registry.py
+build_registry.py — Extract index.md and registry.json from the Tripletex OpenAPI spec.
 
 Reads:  specs/openapi.json
 Writes: specs/index.md, specs/registry.json
@@ -20,6 +9,7 @@ Writes: specs/index.md, specs/registry.json
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 SPEC_PATH = Path(__file__).parent / "openapi.json"
@@ -28,10 +18,16 @@ REGISTRY_OUT = Path(__file__).parent / "registry.json"
 
 HTTP_METHODS = {"get", "post", "put", "delete", "patch"}
 
-# Fields that are meta/internal and never useful in request bodies.
-# id and version are server-assigned but NOT marked readOnly in the spec,
-# so we strip them explicitly to avoid confusing the agent.
+# Server-assigned fields that should never appear in request bodies
 STRIP_FIELDS = {"changes", "url", "id", "version"}
+
+# Stub for linked entities and circular refs — Tripletex only needs {"id": <int>}
+LINKED_ENTITY_STUB = {
+    "type": "object",
+    "properties": {
+        "id": {"type": "integer", "format": "int64", "description": "ID of the linked entity"}
+    },
+}
 
 
 def load_spec() -> dict:
@@ -39,14 +35,7 @@ def load_spec() -> dict:
         return json.load(f)
 
 
-# ── Schema resolver ──────────────────────────────────────────────────
-# The OpenAPI spec uses $ref pointers everywhere (e.g. "$ref": "#/components/schemas/Employee").
-# We need to follow these pointers and inline the actual schema so the registry
-# is self-contained — the agent should never need to look up a reference.
-
-
 def resolve_ref(ref: str, schemas: dict) -> tuple[dict, str]:
-    """Resolve a $ref string like '#/components/schemas/Employee' to its schema dict."""
     name = ref.split("/")[-1]
     return schemas.get(name, {}), name
 
@@ -55,29 +44,28 @@ def resolve_schema(
     schema: dict,
     schemas: dict,
     depth: int = 0,
-    max_depth: int = 3,
-    seen: set | None = None,
+    ancestors: frozenset[str] | None = None,
 ) -> dict:
     """
-    Recursively resolve a JSON schema into a flat, self-contained dict.
-
-    - Follows $ref pointers up to max_depth (3) to avoid infinite recursion
-      on circular references (e.g. Employee -> Department -> Employee)
-    - Preserves: type, format, enum, description, nested properties
-    - For array items with $ref, resolves the item schema
-    - Beyond max_depth, leaves a stub with just the ref name
+    Resolve a JSON schema with object-vs-array branching:
+      depth=0: resolve fully (root payload or array items)
+      depth>=1: stub object $refs to id-only, resolve array items at depth=0
+    Circular refs detected via ancestors set and stubbed to id-only.
     """
-    if seen is None:
-        seen = set()
+    if ancestors is None:
+        ancestors = frozenset()
 
-    # Follow $ref pointer
     if "$ref" in schema:
         resolved, ref_name = resolve_ref(schema["$ref"], schemas)
-        if ref_name in seen or depth >= max_depth:
-            # Circular or too deep — leave a reference stub
-            return {"type": "object", "$ref": ref_name, "_note": "circular/deep — ref only"}
-        seen = seen | {ref_name}
-        return resolve_schema(resolved, schemas, depth + 1, max_depth, seen)
+
+        if ref_name in ancestors:
+            return {**LINKED_ENTITY_STUB, "_ref": ref_name}
+        if not resolved:
+            return {"type": "object", "_missing_ref": ref_name}
+        if depth >= 1:
+            return {**LINKED_ENTITY_STUB, "_ref": ref_name}
+
+        return resolve_schema(resolved, schemas, depth, ancestors | {ref_name})
 
     result: dict = {}
 
@@ -89,56 +77,41 @@ def resolve_schema(
         result["enum"] = schema["enum"]
     if schema.get("description"):
         desc = schema["description"]
-        if len(desc) > 300:
-            desc = desc[:297] + "..."
-        result["description"] = desc
-    if schema.get("readOnly"):
+        result["description"] = desc[:297] + "..." if len(desc) > 300 else desc
+    # Only propagate readOnly on leaf properties, not schema-level objects
+    if schema.get("readOnly") and "properties" not in schema:
         result["readOnly"] = True
 
-    # Object with properties — resolve each property recursively
     if "properties" in schema:
         props = {}
         for prop_name, prop_schema in schema["properties"].items():
             if prop_name in STRIP_FIELDS:
                 continue
-            props[prop_name] = resolve_schema(prop_schema, schemas, depth + 1, max_depth, seen)
+            props[prop_name] = resolve_schema(prop_schema, schemas, depth + 1, ancestors)
         result["properties"] = props
         if schema.get("required"):
             result["required"] = schema["required"]
 
-    # Array items — resolve the item schema
+    # Array items resolve at depth=0 — they're inline child creations, not entity links
     if schema.get("type") == "array" and "items" in schema:
-        result["items"] = resolve_schema(schema["items"], schemas, depth + 1, max_depth, seen)
+        result["items"] = resolve_schema(schema["items"], schemas, 0, ancestors)
 
-    # Union types
     for keyword in ("oneOf", "anyOf", "allOf"):
         if keyword in schema:
-            result[keyword] = [
-                resolve_schema(s, schemas, depth + 1, max_depth, seen)
-                for s in schema[keyword]
-            ]
+            result[keyword] = [resolve_schema(s, schemas, depth, ancestors) for s in schema[keyword]]
 
     return result
 
 
 def strip_readonly(schema: dict) -> dict | None:
-    """
-    Remove readOnly properties from a resolved schema tree.
-    readOnly fields are server-generated (id, version, displayName, etc.)
-    and must never be sent in POST/PUT request bodies.
-    Stripping them gives the agent a clean view of only the fields it can set.
-    """
+    """Remove readOnly properties from a resolved schema tree."""
     if schema.get("readOnly"):
         return None
 
     result = {}
     for k, v in schema.items():
         if k == "properties" and isinstance(v, dict):
-            cleaned = {}
-            for prop_name, prop_schema in v.items():
-                stripped = strip_readonly(prop_schema)
-                if stripped is not None:
-                    cleaned[prop_name] = stripped
+            cleaned = {pn: ps for pn, pv in v.items() if (ps := strip_readonly(pv)) is not None}
             if cleaned:
                 result["properties"] = cleaned
         elif k == "items" and isinstance(v, dict):
@@ -146,19 +119,10 @@ def strip_readonly(schema: dict) -> dict | None:
             result["items"] = stripped if stripped is not None else v
         else:
             result[k] = v
-
     return result
 
 
-# ── Query parameter extraction ───────────────────────────────────────
-
-
 def extract_query_params(parameters: list[dict]) -> list[dict]:
-    """
-    Extract query parameters from an endpoint's parameter list.
-    These are the ?key=value params used for filtering/searching on GET endpoints
-    (e.g. GET /employee?firstName=Ola&fields=id,firstName,lastName).
-    """
     params = []
     for p in parameters:
         if p.get("in") != "query":
@@ -175,42 +139,27 @@ def extract_query_params(parameters: list[dict]) -> list[dict]:
             param["default"] = s["default"]
         desc = p.get("description", "")
         if desc:
-            if len(desc) > 200:
-                desc = desc[:197] + "..."
-            param["description"] = desc
+            param["description"] = desc[:197] + "..." if len(desc) > 200 else desc
         if p.get("required"):
             param["required"] = True
         params.append(param)
     return params
 
 
-# ── Response schema extraction ───────────────────────────────────────
-
-
 def extract_response_schema(responses: dict, schemas: dict) -> dict | None:
-    """
-    Extract a lightweight description of the success response (200/201).
-    Tripletex wraps responses in ResponseWrapper* (single entity) or
-    ListResponse* (list of entities). We record the pattern so the agent
-    knows whether to expect .value or .values in the response.
-    """
     for code in ("200", "201"):
         resp = responses.get(code, {})
-        content = resp.get("content", {})
-        for content_type, media in content.items():
+        for _, media in resp.get("content", {}).items():
             schema = media.get("schema", {})
-            resolved = resolve_schema(schema, schemas, depth=0, max_depth=1)
+            resolved = resolve_schema(schema, schemas)
             props = resolved.get("properties", {})
             ref_name = schema.get("$ref", "").split("/")[-1] if "$ref" in schema else None
             if "value" in props:
                 return {"type": "single", "schema_ref": ref_name}
-            elif "values" in props:
+            if "values" in props:
                 return {"type": "list", "schema_ref": ref_name}
             return resolved
     return None
-
-
-# ── Main builders ────────────────────────────────────────────────────
 
 
 def build_index_and_registry(spec: dict) -> tuple[str, dict]:
@@ -220,14 +169,9 @@ def build_index_and_registry(spec: dict) -> tuple[str, dict]:
     index_lines = [
         "# Tripletex API — Endpoint Index",
         "",
-        "Lightweight lookup table of every API endpoint.",
-        "Use this to identify which endpoints are needed for a task,",
-        "then pull detailed schemas from registry.json.",
-        "",
         "| Method | Path | Summary |",
         "|--------|------|---------|",
     ]
-
     registry: dict = {}
 
     for path in sorted(paths.keys()):
@@ -236,41 +180,51 @@ def build_index_and_registry(spec: dict) -> tuple[str, dict]:
             if method not in HTTP_METHODS:
                 continue
             details = methods[method]
-            summary = details.get("summary", details.get("description", ""))
-            summary = summary.replace("\n", " ").strip()
-            if len(summary) > 120:
-                summary = summary[:117] + "..."
+            summary = details.get("summary", details.get("description", "")).replace("\n", " ").strip()
+            if len(summary) > 200:
+                summary = summary[:197] + "..."
 
             key = f"{method.upper()} {path}"
-
-            # ── Index: one line per endpoint ──
             index_lines.append(f"| {method.upper()} | `{path}` | {summary} |")
 
-            # ── Registry: full structured detail ──
             entry: dict = {"summary": summary}
-
             if details.get("tags"):
                 entry["tags"] = details["tags"]
 
-            # Query parameters (for GET, DELETE, etc.)
-            params = details.get("parameters", [])
-            query_params = extract_query_params(params)
+            query_params = extract_query_params(details.get("parameters", []))
             if query_params:
                 entry["query_params"] = query_params
 
-            # Request body schema (for POST, PUT, PATCH)
-            # Resolved inline with readOnly fields stripped
             if "requestBody" in details:
                 content = details["requestBody"].get("content", {})
-                for content_type, media in content.items():
-                    body_schema = media.get("schema", {})
-                    resolved = resolve_schema(body_schema, schemas, depth=0, max_depth=3)
-                    cleaned = strip_readonly(resolved)
-                    if cleaned:
-                        entry["request_body"] = cleaned
-                    break
 
-            # Response shape (single vs list, schema ref name)
+                if "multipart/form-data" in content:
+                    form_schema = content["multipart/form-data"].get("schema", {})
+                    form_props = {}
+                    for prop_name, prop_val in form_schema.get("properties", {}).items():
+                        if prop_val.get("format") == "binary":
+                            form_props[prop_name] = {"type": "binary", "description": prop_val.get("description", "File upload")}
+                        else:
+                            field: dict = {}
+                            if prop_val.get("type"):
+                                field["type"] = prop_val["type"]
+                            if prop_val.get("description"):
+                                field["description"] = prop_val["description"]
+                            if prop_val.get("enum"):
+                                field["enum"] = prop_val["enum"]
+                            form_props[prop_name] = field
+                    if form_props:
+                        entry["request_body"] = {"content_type": "multipart/form-data", "properties": form_props}
+                        if form_schema.get("required"):
+                            entry["request_body"]["required"] = form_schema["required"]
+                else:
+                    for _, media in content.items():
+                        resolved = resolve_schema(media.get("schema", {}), schemas)
+                        cleaned = strip_readonly(resolved)
+                        if cleaned:
+                            entry["request_body"] = cleaned
+                        break
+
             if "responses" in details:
                 resp_info = extract_response_schema(details["responses"], schemas)
                 if resp_info:
@@ -278,30 +232,24 @@ def build_index_and_registry(spec: dict) -> tuple[str, dict]:
 
             registry[key] = entry
 
-    index_md = "\n".join(index_lines) + "\n"
-    return index_md, registry
+    return "\n".join(index_lines) + "\n", registry
 
 
 def main():
-    print(f"Loading spec from {SPEC_PATH}...")
     spec = load_spec()
-
-    print("Building index and registry...")
     index_md, registry = build_index_and_registry(spec)
 
     INDEX_OUT.write_text(index_md)
-    print(f"  index.md — {len(index_md.splitlines())} lines")
-
     registry_json = json.dumps(registry, indent=2, ensure_ascii=False)
     REGISTRY_OUT.write_text(registry_json)
 
     total = len(registry)
     with_body = sum(1 for v in registry.values() if "request_body" in v)
     with_params = sum(1 for v in registry.values() if "query_params" in v)
-    size_kb = len(registry_json) / 1024
-
-    print(f"  registry.json — {total} endpoints, {size_kb:.0f} KB")
-    print(f"    {with_body} with request_body, {with_params} with query_params")
+    print(f"index.md — {len(index_md.splitlines())} lines")
+    print(f"registry.json — {total} endpoints, {len(registry_json) / 1024:.0f} KB")
+    print(f"  {with_body} with request_body, {with_params} with query_params")
+    print(f"  stubs: {registry_json.count('\"_ref\"')} | enums: {len(re.findall('\"enum\":', registry_json))} | missing: {registry_json.count('\"_missing_ref\"')}")
 
 
 if __name__ == "__main__":
