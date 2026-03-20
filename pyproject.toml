@@ -9,4 +9,7 @@ dependencies = [
     "numpy",
     "python-dotenv>=1.2.2",
     "optuna>=4.8.0",
+    "iterative-stratification>=0.1.7",
+    "ultralytics>=8.1.0",
+    "torch>=2.0.0",
 ]
