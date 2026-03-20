@@ -8,10 +8,10 @@ load_dotenv()
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 
-# TODO: import agent entry point once built, e.g.:
-# from agent import run
+from agent import run
+from agent.logging_config import setup_logging
 
-logging.basicConfig(level=logging.INFO)
+setup_logging()
 logger = logging.getLogger("tripletex-agent")
 
 app = FastAPI()
