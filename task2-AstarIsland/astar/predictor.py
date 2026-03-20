@@ -5,7 +5,7 @@ from .types import MapState, Prediction, RoundStats, NUM_CLASSES, CLASS_EMPTY, C
 from .features import compute_features, NUM_FEATURES, FEATURE_NAMES
 from .calibration import round_stats_to_array
 
-PROB_FLOOR = 0.01
+PROB_FLOOR = 0.0005
 
 # Cell features to interact with round-level settlement_rate
 _DIST_IDX = FEATURE_NAMES.index("dist_nearest_settlement")
