@@ -5,14 +5,10 @@ WORKDIR /app
 RUN pip install --no-cache-dir \
     fastapi \
     "uvicorn[standard]" \
-    openai-agents \
     httpx \
-    python-dotenv \
-    litellm
+    python-dotenv
 
-COPY core/ core/
-COPY thomas/ thomas/
-COPY docs/openapi.json docs/openapi.json
+# TODO: COPY agent code once built
 COPY api.py .
 
 CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8080"]
