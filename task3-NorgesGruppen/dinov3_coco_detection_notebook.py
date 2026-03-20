@@ -11,7 +11,7 @@ from PIL import Image
 from torch.utils.data import DataLoader, Dataset
 from transformers import AutoBackbone, AutoConfig, AutoImageProcessor, DetrConfig, DetrForObjectDetection
 
-DATA_DIR = "PATH"
+DATA_DIR = "./data"
 OUTPUT_DIR = "./outputs_dinov2_detr"
 VAL_RATIO = 0.1
 EPOCHS = 200
