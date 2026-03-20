@@ -97,31 +97,43 @@ def save_observation(
     viewport: dict,
     result: dict,
 ) -> None:
-    """Save a simulation observation keyed by viewport coordinates.
+    """Save a simulation observation. Multiple observations per viewport are preserved.
 
     result should contain: grid, settlements, viewport, queries_used, queries_max.
     """
     vx, vy = viewport["x"], viewport["y"]
-    fname = f"obs_{vx}_{vy}.json"
-    _write_json(_obs_dir(round_number, seed_index) / fname, result)
+    obs_path = _obs_dir(round_number, seed_index)
+    # Find next available index for this viewport position
+    idx = 0
+    while (obs_path / f"obs_{vx}_{vy}_{idx}.json").exists():
+        idx += 1
+    _write_json(obs_path / f"obs_{vx}_{vy}_{idx}.json", result)
 
 
-def load_observation(
+def load_observations_at(
     round_number: int, seed_index: int, viewport_x: int, viewport_y: int
-) -> Optional[dict]:
-    fname = f"obs_{viewport_x}_{viewport_y}.json"
-    return _read_json(_obs_dir(round_number, seed_index) / fname)
+) -> list[dict]:
+    """Load all observations for a specific viewport position."""
+    obs_path = _obs_dir(round_number, seed_index)
+    if not obs_path.exists():
+        return []
+    results = []
+    for f in sorted(obs_path.glob(f"obs_{viewport_x}_{viewport_y}_*.json")):
+        results.append(json.loads(f.read_text()))
+    return results
 
 
 def list_observations(round_number: int, seed_index: int) -> list[dict]:
-    """Load all observations for a seed, sorted by filename."""
+    """Load all observations for a seed, sorted by filename.
+
+    Handles both old format (obs_X_Y.json) and new format (obs_X_Y_N.json).
+    """
     obs_path = _obs_dir(round_number, seed_index)
     if not obs_path.exists():
         return []
     results = []
     for f in sorted(obs_path.glob("obs_*.json")):
-        data = json.loads(f.read_text())
-        results.append(data)
+        results.append(json.loads(f.read_text()))
     return results
 
 
