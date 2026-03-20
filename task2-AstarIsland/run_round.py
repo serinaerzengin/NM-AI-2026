@@ -1,5 +1,7 @@
 """Live round orchestrator for Astar Island.
 
+Uses CatBoost as primary model + empirical bins for round-specific calibration.
+
 Usage:
     python run_round.py              # Auto-detect active round
     python run_round.py <round_id>   # Specify round ID
@@ -11,39 +13,65 @@ import time
 from pathlib import Path
 
 import numpy as np
+from catboost import CatBoostRegressor
 
 sys.path.insert(0, str(Path(__file__).parent))
 
 import api
 import store
-from astar.types import MapState, Observation, RoundStats, NUM_CLASSES
+from astar.types import MapState, Observation, RoundStats, NUM_CLASSES, OCEAN, MOUNTAIN
+from astar.features import compute_features
 from astar.calibration import (
     compute_round_stats_from_ground_truth,
     compute_round_stats_from_observations,
+    round_stats_to_array,
 )
-from astar.predictor import Predictor
+from astar.predictor import _build_row, _static_prediction, _is_static_cell, PROB_FLOOR
 from astar.query_strategy import plan_viewports, allocate_queries
 from astar.empirical_bins import build_empirical_distributions, predict_with_empirical_bins, get_bin_coverage_stats
+from astar.types import Prediction
 
 DATA_DIR = Path(__file__).parent / "data" / "rounds"
+BEST_PARAMS_ALL_PATH = Path(__file__).parent / "best_params_all.json"
 BEST_PARAMS_PATH = Path(__file__).parent / "best_params.json"
-TRAINING_ROUNDS = list(range(1, 8))  # Rounds 1-7
 SEEDS = list(range(5))
 RATE_LIMIT_DELAY = 0.25
 
 
-def load_best_params() -> dict | None:
+def get_training_rounds() -> list[int]:
+    """Detect all rounds with ground truth data."""
+    rounds = []
+    for d in sorted(DATA_DIR.iterdir()):
+        if d.is_dir() and d.name.startswith("round_"):
+            rn = int(d.name.split("_")[1])
+            if (d / "seed_0" / "ground_truth.json").exists():
+                rounds.append(rn)
+    return rounds
+
+
+def load_catboost_params() -> dict:
+    """Load CatBoost params from best_params_all.json, fallback to defaults."""
+    if BEST_PARAMS_ALL_PATH.exists():
+        with open(BEST_PARAMS_ALL_PATH) as f:
+            all_params = json.load(f)
+        if "catboost" in all_params:
+            return all_params["catboost"]
+    return {"iterations": 200, "depth": 5, "learning_rate": 0.1, "l2_leaf_reg": 6.0, "subsample": 0.8}
+
+
+def load_xgb_k_param() -> float:
+    """Load k from XGBoost best_params.json (used for empirical bin blending)."""
     if BEST_PARAMS_PATH.exists():
         with open(BEST_PARAMS_PATH) as f:
-            return json.load(f)
-    return None
+            return json.load(f).get("k", 150)
+    return 150
 
 
-def load_training_data() -> tuple[list[MapState], list[np.ndarray], list[RoundStats]]:
-    """Load all historical training data (rounds 1-6)."""
-    states, gts, stats_list = [], [], []
+def load_training_data(training_rounds: list[int]):
+    """Build training arrays from historical ground truth."""
+    X_rows, y_rows, w_rows = [], [], []
 
-    for rn in TRAINING_ROUNDS:
+    for rn in training_rounds:
         round_stats_all = []
         round_data = []
         for si in SEEDS:
@@ -66,13 +94,79 @@ def load_training_data() -> tuple[list[MapState], list[np.ndarray], list[RoundSt
             empty_rate=np.mean([s.empty_rate for s in round_stats_all]),
             settlement_to_ruin_ratio=np.mean([s.settlement_to_ruin_ratio for s in round_stats_all]),
         )
+        stats_arr = round_stats_to_array(avg_stats)
 
         for state, gt in round_data:
-            states.append(state)
-            gts.append(gt)
-            stats_list.append(avg_stats)
+            features = compute_features(state)
+            h, w = gt.shape[:2]
+            eps = 1e-12
+            entropy = -np.sum(gt * np.log(gt + eps), axis=-1)
+            for r in range(h):
+                for c in range(w):
+                    if _is_static_cell(state.grid[r, c], gt[r, c]):
+                        continue
+                    row = _build_row(features[r, c], stats_arr)
+                    X_rows.append(row)
+                    y_rows.append(gt[r, c])
+                    w_rows.append(entropy[r, c] + 0.1)
 
-    return states, gts, stats_list
+    return (
+        np.array(X_rows, dtype=np.float32),
+        np.array(y_rows, dtype=np.float32),
+        np.array(w_rows, dtype=np.float32),
+    )
+
+
+def train_catboost(X, y, w, params):
+    """Train 6 CatBoost regressors (one per class)."""
+    models = []
+    for c in range(NUM_CLASSES):
+        target = y[:, c]
+        if target.max() - target.min() < 1e-8:
+            models.append(None)
+            continue
+        m = CatBoostRegressor(loss_function="RMSE", verbose=0, thread_count=-1, **params)
+        m.fit(X, target, sample_weight=w)
+        models.append(m)
+    return models
+
+
+def predict_catboost(models, X):
+    """Predict with CatBoost ensemble, returns (N, 6)."""
+    return np.column_stack([
+        np.zeros(len(X), dtype=np.float32) if m is None else m.predict(X).astype(np.float32)
+        for m in models
+    ])
+
+
+def predict_map(models, state, round_stats):
+    """Generate full 40x40x6 prediction for a map."""
+    features = compute_features(state)
+    stats_arr = round_stats_to_array(round_stats)
+    h, w = state.grid.shape
+    probs = np.zeros((h, w, NUM_CLASSES), dtype=np.float32)
+
+    dynamic_indices = []
+    X_rows = []
+
+    for r in range(h):
+        for c in range(w):
+            sp = _static_prediction(state.grid[r, c])
+            if sp is not None:
+                probs[r, c] = sp
+            else:
+                dynamic_indices.append((r, c))
+                X_rows.append(_build_row(features[r, c], stats_arr))
+
+    if X_rows:
+        X = np.array(X_rows, dtype=np.float32)
+        preds = predict_catboost(models, X)
+        for (r, c), pred in zip(dynamic_indices, preds):
+            probs[r, c] = pred
+
+    probs = np.maximum(probs, PROB_FLOOR)
+    probs = probs / probs.sum(axis=-1, keepdims=True)
+    return Prediction(probs=probs)
 
 
 def fetch_round_states(round_detail: dict) -> list[MapState]:
@@ -85,12 +179,7 @@ def fetch_round_states(round_detail: dict) -> list[MapState]:
     return states
 
 
-def execute_queries(
-    round_id: str,
-    states: list[MapState],
-    round_number: int,
-) -> list[list[Observation]]:
-    """Execute simulation queries and return observations per seed."""
+def execute_queries(round_id, states, round_number):
     allocation = allocate_queries(states)
     print(f"  Query allocation: {allocation} (total={sum(allocation)})")
 
@@ -103,10 +192,8 @@ def execute_queries(
         for vx, vy in viewports:
             try:
                 result = api.simulate(
-                    round_id=round_id,
-                    seed_index=si,
-                    viewport_x=vx,
-                    viewport_y=vy,
+                    round_id=round_id, seed_index=si,
+                    viewport_x=vx, viewport_y=vy,
                 )
                 obs = Observation(
                     grid=np.array(result["grid"]),
@@ -124,7 +211,6 @@ def execute_queries(
 
 
 def main():
-    # Determine round
     if len(sys.argv) > 1:
         round_id = sys.argv[1]
         detail = api.get_round_detail(round_id)
@@ -143,15 +229,14 @@ def main():
 
     store.save_round(round_number, detail)
 
-    # Step 1: Train model
-    print("\n[1/5] Training model on historical data...")
-    best_params = load_best_params()
-    if best_params:
-        print(f"  Using optimized params from {BEST_PARAMS_PATH.name}")
-    train_states, train_gts, train_stats = load_training_data()
-    predictor = Predictor(params=best_params)
-    predictor.fit(train_states, train_gts, train_stats)
-    print(f"  Trained on {len(train_states)} maps ({len(TRAINING_ROUNDS)} rounds)")
+    # Step 1: Train CatBoost
+    print("\n[1/5] Training CatBoost on historical data...")
+    training_rounds = get_training_rounds()
+    cat_params = load_catboost_params()
+    print(f"  Params: {cat_params}")
+    X, y, w = load_training_data(training_rounds)
+    models = train_catboost(X, y, w, cat_params)
+    print(f"  Trained on {len(X)} cells from {len(training_rounds)} rounds ({training_rounds})")
 
     # Step 2: Get current round states
     print("\n[2/5] Loading current round initial states...")
@@ -172,52 +257,58 @@ def main():
     else:
         all_observations = execute_queries(round_id, states, round_number)
 
-    # Flatten all observations for empirical bins
     all_obs_flat = []
     for obs_list in all_observations:
         all_obs_flat.extend(obs_list)
 
-    # Step 4: Build empirical bins from all observations
+    # Step 4: Build empirical bins + predict
     print("\n[4/5] Generating predictions...")
 
-    # Compute round stats from all observations combined
     if all_obs_flat:
         combined_round_stats = compute_round_stats_from_observations(all_obs_flat, states[0])
-        # Build empirical bins across ALL seeds' observations
         bin_dists = build_empirical_distributions(all_obs_flat, states)
         bin_counts = get_bin_coverage_stats(all_obs_flat, states)
         print(f"  Empirical bins: {len(bin_dists)} bins with data")
         print(f"  Round stats: settle={combined_round_stats.settlement_rate:.3f}, "
               f"ruin={combined_round_stats.ruin_rate:.3f}")
     else:
+        # Fallback: average historical stats
+        all_stats = []
+        for rn in training_rounds:
+            for si in SEEDS:
+                sd = DATA_DIR / f"round_{rn}" / f"seed_{si}"
+                with open(sd / "initial_state.json") as f: raw = json.load(f)
+                with open(sd / "ground_truth.json") as f: gt_raw = json.load(f)
+                state_t = MapState(grid=np.array(raw["grid"]), settlements=raw["settlements"])
+                gt_t = np.array(gt_raw["ground_truth"])
+                all_stats.append(compute_round_stats_from_ground_truth(gt_t, state_t))
         combined_round_stats = RoundStats(
-            ruin_rate=np.mean([s.ruin_rate for s in train_stats]),
-            settlement_rate=np.mean([s.settlement_rate for s in train_stats]),
-            port_rate=np.mean([s.port_rate for s in train_stats]),
-            expansion_distance=np.mean([s.expansion_distance for s in train_stats]),
-            forest_rate=np.mean([s.forest_rate for s in train_stats]),
-            empty_rate=np.mean([s.empty_rate for s in train_stats]),
-            settlement_to_ruin_ratio=np.mean([s.settlement_to_ruin_ratio for s in train_stats]),
+            ruin_rate=np.mean([s.ruin_rate for s in all_stats]),
+            settlement_rate=np.mean([s.settlement_rate for s in all_stats]),
+            port_rate=np.mean([s.port_rate for s in all_stats]),
+            expansion_distance=np.mean([s.expansion_distance for s in all_stats]),
+            forest_rate=np.mean([s.forest_rate for s in all_stats]),
+            empty_rate=np.mean([s.empty_rate for s in all_stats]),
+            settlement_to_ruin_ratio=np.mean([s.settlement_to_ruin_ratio for s in all_stats]),
         )
         bin_dists = {}
+        bin_counts = {}
 
     # Predict and submit each seed
     for si, state in enumerate(states):
-        # Base model prediction
-        base_pred = predictor.predict(state, combined_round_stats)
+        base_pred = predict_map(models, state, combined_round_stats)
 
-        # Blend with empirical bins
         if bin_dists:
-            # Adaptive k: low-activity rounds → trust bins more (lower k)
-            base_k = best_params.get("k", 150) if best_params else 150
             settle_rate = combined_round_stats.settlement_rate
+            base_k = load_xgb_k_param()
             if settle_rate < 0.05:
-                k = 50  # Low activity: bins are very reliable
+                k = 50
             elif settle_rate < 0.10:
                 k = min(base_k, 100)
             else:
                 k = base_k
-            print(f"    k={k:.0f} (settle_rate={settle_rate:.3f})")
+            if si == 0:
+                print(f"    k={k:.0f} (settle_rate={settle_rate:.3f})")
             final_pred = predict_with_empirical_bins(
                 state, bin_dists, base_pred, bin_counts=bin_counts, k=k
             )
@@ -226,7 +317,6 @@ def main():
 
         probs = final_pred.probs
 
-        # Submit
         print(f"  Seed {si}: submitting...")
         try:
             result = api.submit(round_id, si, probs.tolist())
@@ -245,8 +335,8 @@ def main():
     try:
         my_rounds = api.get_my_rounds()
         current = next((r for r in my_rounds if r["id"] == round_id), None)
-        if current and current.get("scores"):
-            print(f"  Scores: {current['scores']}")
+        if current and current.get("round_score"):
+            print(f"  Round score: {current['round_score']}")
     except Exception:
         pass
 
