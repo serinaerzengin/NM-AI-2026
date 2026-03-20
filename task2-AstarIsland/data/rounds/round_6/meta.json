@@ -1,0 +1,11 @@
+{
+  "id": "ae78003a-4efe-425a-881a-d16a39bca0ad",
+  "round_number": 6,
+  "status": "active",
+  "map_width": 40,
+  "map_height": 40,
+  "seeds_count": 5,
+  "round_weight": 1.3401,
+  "started_at": "2026-03-20T09:08:16.644541+00:00",
+  "closes_at": "2026-03-20T11:53:16.644541+00:00"
+}
