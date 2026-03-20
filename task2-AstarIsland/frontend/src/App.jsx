@@ -4,21 +4,22 @@ import GridView from './components/GridView'
 import { TerrainLegend, ClassLegend } from './components/GridLegend'
 import StatsPanel from './components/StatsPanel'
 import CrossRoundCharts from './components/CrossRoundCharts'
+import ScoresPanel from './components/ScoresPanel'
 
 function App() {
   const { rounds, loading, reload } = useRounds()
   const [selectedRound, setSelectedRound] = useState(null)
   const [selectedSeed, setSelectedSeed] = useState(0)
-  const [tab, setTab] = useState('round') // 'round' | 'overview'
+  const [tab, setTab] = useState('round')
 
   const round = selectedRound != null
     ? rounds.find(r => r.round_number === selectedRound)
     : rounds[0]
 
   const roundNumber = round?.round_number
-  const { initialState, groundTruth, loading: seedLoading } = useSeedData(roundNumber, selectedSeed)
+  const seedInfo = round?.seeds?.find(s => s.index === selectedSeed)
+  const { initialState, groundTruth, prediction, observations, loading: seedLoading } = useSeedData(roundNumber, selectedSeed)
 
-  // Auto-select first round on load
   if (!loading && rounds.length > 0 && selectedRound == null) {
     setSelectedRound(rounds[0].round_number)
   }
@@ -35,11 +36,16 @@ function App() {
           Round View
         </button>
         <button className={tab === 'overview' ? 'active' : ''} onClick={() => setTab('overview')}>
-          Cross-Round Overview
+          Cross-Round
+        </button>
+        <button className={tab === 'scores' ? 'active' : ''} onClick={() => setTab('scores')}>
+          Scores
         </button>
       </div>
 
-      {tab === 'overview' ? (
+      {tab === 'scores' ? (
+        <ScoresPanel />
+      ) : tab === 'overview' ? (
         <CrossRoundCharts rounds={rounds} />
       ) : (
         <>
@@ -56,11 +62,11 @@ function App() {
             <label>Seed:</label>
             <select value={selectedSeed} onChange={e => setSelectedSeed(+e.target.value)}>
               {(round?.seeds || []).map(s => (
-                <option key={s} value={s}>Seed {s}</option>
+                <option key={s.index} value={s.index}>Seed {s.index}</option>
               ))}
             </select>
 
-            <button onClick={reload}>Reload Rounds</button>
+            <button onClick={reload}>Reload</button>
           </div>
 
           {round && (
@@ -70,21 +76,33 @@ function App() {
                 <div className="value">{round.status}</div>
               </div>
               <div className="info-card">
-                <div className="label">Map Size</div>
+                <div className="label">Map</div>
                 <div className="value">{round.map_width}x{round.map_height}</div>
-              </div>
-              <div className="info-card">
-                <div className="label">Seeds</div>
-                <div className="value">{round.seeds_count}</div>
               </div>
               <div className="info-card">
                 <div className="label">Weight</div>
                 <div className="value">{round.round_weight}</div>
               </div>
-              <div className="info-card">
-                <div className="label">Started</div>
-                <div className="value" style={{ fontSize: '0.85rem' }}>{new Date(round.started_at).toLocaleString()}</div>
-              </div>
+              {seedInfo && (
+                <>
+                  <div className="info-card">
+                    <div className="label">Observations</div>
+                    <div className="value">{seedInfo.obsCount}</div>
+                  </div>
+                  <div className="info-card">
+                    <div className="label">Ground Truth</div>
+                    <div className="value" style={{ color: seedInfo.hasGT ? '#22c55e' : '#8b949e' }}>
+                      {seedInfo.hasGT ? 'Yes' : 'No'}
+                    </div>
+                  </div>
+                  <div className="info-card">
+                    <div className="label">Prediction</div>
+                    <div className="value" style={{ color: seedInfo.hasPred ? '#58a6ff' : '#8b949e' }}>
+                      {seedInfo.hasPred ? 'Submitted' : 'No'}
+                    </div>
+                  </div>
+                </>
+              )}
             </div>
           )}
 
@@ -95,19 +113,59 @@ function App() {
               <div className="grid-section">
                 {initialState && (
                   <div>
-                    <GridView grid={initialState.grid} title="Initial State" />
+                    <GridView
+                      grid={initialState.grid}
+                      observations={observations}
+                      title="Initial State"
+                    />
                     <TerrainLegend />
+                    {observations.length > 0 && (
+                      <p style={{ color: '#58a6ff', fontSize: '0.8rem', marginTop: 4 }}>
+                        Blue rectangles = observation viewports ({observations.length} queries)
+                      </p>
+                    )}
                   </div>
                 )}
                 {groundTruth && (
                   <div>
-                    <GridView groundTruth={groundTruth.ground_truth} title="Ground Truth (Probability)" />
+                    <GridView groundTruth={groundTruth.ground_truth} title="Ground Truth" />
                     <ClassLegend />
+                  </div>
+                )}
+                {prediction && !groundTruth && (
+                  <div>
+                    <GridView prediction={prediction} title="Prediction (argmax + confidence)" />
+                    <ClassLegend />
+                    <p style={{ color: '#8b949e', fontSize: '0.8rem', marginTop: 4 }}>
+                      Brightness = confidence. Dim cells are uncertain.
+                    </p>
                   </div>
                 )}
               </div>
 
-              <StatsPanel initialState={initialState} groundTruth={groundTruth} />
+              {initialState && groundTruth && (
+                <StatsPanel initialState={initialState} groundTruth={groundTruth} />
+              )}
+
+              {initialState && !groundTruth && observations.length > 0 && (
+                <div className="chart-card" style={{ marginBottom: 24 }}>
+                  <h3>Observation Summary (no ground truth yet)</h3>
+                  <div className="round-info" style={{ marginTop: 12 }}>
+                    <div className="info-card">
+                      <div className="label">Queries Used</div>
+                      <div className="value">{observations.length}</div>
+                    </div>
+                    <div className="info-card">
+                      <div className="label">Settlements (initial)</div>
+                      <div className="value">{initialState.settlements.length}</div>
+                    </div>
+                    <div className="info-card">
+                      <div className="label">Ports (initial)</div>
+                      <div className="value">{initialState.settlements.filter(s => s.has_port).length}</div>
+                    </div>
+                  </div>
+                </div>
+              )}
             </>
           )}
         </>

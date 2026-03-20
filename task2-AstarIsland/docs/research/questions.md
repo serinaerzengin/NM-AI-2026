@@ -93,10 +93,10 @@ Status legend:
 - `v1` Q16. What is the minimum number of queries per seed to get a useful signal?
 
 #### A4. Post-Round Learning (Analysis Endpoint)
-- `OPEN` Q27. After a completed round, what does the ground truth distribution actually look like?
+- `v1` Q27. After a completed round, what does the ground truth distribution actually look like?
 - `OPEN` Q28. Which cells had the highest entropy (hardest to predict)?
-- `OPEN` Q29. Where did my predictions diverge most from ground truth?
-- `OPEN` Q30. Can ground truth from past rounds train a model for future rounds?
+- `v1` Q29. Where did my predictions diverge most from ground truth?
+- `v1` Q30. Can ground truth from past rounds train a model for future rounds?
 
 ### Category B: Methods & Strategy
 
@@ -138,6 +138,11 @@ Status legend:
 - `v1` L1. Regime detection from initial-settlement survival is unreliable — use ALL observation data instead
 - `v1` L2. The argmax visualization is misleading — it shows the single most likely class, not the probability spread
 - `v1` L3. Always cross-check: count settlements in raw observations vs what your prior predicts
+- `v1` L4. R6 post-mortem: extrapolation beyond training range killed us on forest and plains predictions
+- `v1` L5. Forest cells are far more dynamic than assumed — settlements aggressively replace forests in high expansion
+- `v1` L6. Ruin floor should be ~0.02 not 0.005 in high-expansion rounds
+- `v1` L7. Always retrain/expand the continuous model when new ground truth arrives
+- `DONE` L8. The grid is effectively 38×38 — outer ring is always 100% ocean (156 cells). Playable land: ~1350 cells, not 1600.
 
 ---
 
@@ -652,3 +657,53 @@ IGNORE (not worth tracking):
 - Port/Ruin/Mountain Brier: always < 0.002, negligible impact
 - Static cell accuracy: zero entropy weight, zero score impact
 - Argmax accuracy: misleading — a correct argmax with wrong probabilities scores worse than a wrong argmax with calibrated probabilities
+
+### A4. Post-Round Learning
+
+**Q27. After a completed round, what does the ground truth distribution actually look like?**
+v1 (R6 analysis): R6 had settlement rate 0.259 — the highest of any round so far. Ground truth distributions:
+- Init settlements: P(empty)=0.38, P(settle)=0.41, P(forest)=0.17, P(ruin)=0.04
+- Forest cells: P(forest)=0.55, P(settle)=0.25, P(empty)=0.15 — forests are very dynamic in high-expansion rounds
+- Plains d0-3: P(empty)=0.60, P(settle)=0.28 — heavy expansion to nearby plains
+- Plains d4+: P(empty)=0.70, P(settle)=0.20 — significant expansion even at distance 4+
+- Dynamic cells: 1319-1394 per seed (~85% of map)
+
+Settlement rates across all 6 rounds: R3=0.003, R4=0.10, R5=0.14, R1=0.18, R2=0.21, R6=0.26. The range is 0.003 to 0.259.
+
+**Q29. Where did my predictions diverge most from ground truth?**
+v1 (R6 analysis, score=62.3, rank 74/186):
+
+Three systematic errors, consistent across all 5 seeds:
+
+1. **Forest cells** (biggest error, 5-6% of score): Over-predicted P(forest) by +0.15, under-predicted P(settle) by -0.07. Forests in R6 were far more dynamic than R1 training data suggested. In R6, 25% of forest cells became settlements vs 15% in R1.
+
+2. **Plains d0-3** (5-7% of score): Under-predicted P(settle) by -0.07. Expansion was more aggressive than R1 priors.
+
+3. **Plains d4+** (3-5% of score): Under-predicted P(settle) by -0.06. Far expansion was underestimated.
+
+Root cause: R6 settle_rate=0.259 was beyond training range (max was R2=0.214). The linear model extrapolated poorly — all per-terrain priors were systematically too conservative on settlement probability.
+
+What went right: Initial settlement predictions were excellent (<0.03 error). The high-expansion prior resubmission caught the regime correctly.
+
+**Q30. Can ground truth from past rounds train a model for future rounds?**
+v1: YES but with caveats:
+- The continuous rate model (Q46) works well WITHIN the training range (r=0.94-0.99)
+- **Extrapolation fails**: R6 was outside the training range and all predictions were systematically off
+- Each new round's ground truth expands the training range and should be incorporated immediately
+- Training data now: R1-R6 (6 rounds, 30 seeds) with rate range 0.003-0.259
+- The per-terrain coefficients should be refitted after each round with the new data
+- Cross-round transfer works because hidden params affect all seeds the same way (Q15)
+
+### D. Lessons Learned (R6 post-mortem)
+
+**L4. Extrapolation beyond training range killed forest and plains predictions.**
+R6 had settle_rate=0.259, but our training data only went up to 0.214 (R2). The linear model extrapolated, but the real relationship curves — forests become MUCH more dynamic above rate 0.20 than the linear fit predicted. Fix: retrain on R6 data, consider non-linear fit.
+
+**L5. Forest cells are far more dynamic than assumed.**
+In high expansion rounds, 25% of forest cells become settlements. Our R1-fitted prior assumed only 15%. Forest adjacent to settlements is essentially "soft land" that gets colonized aggressively. The prior for forest cells should scale more steeply with settlement rate.
+
+**L6. Ruin floor should be ~0.02 not 0.005.**
+Ruin was under-predicted by 0.01-0.02 everywhere. In high-expansion rounds, the higher conflict and collapse rate means more ruins at any given time. Floor of 0.005 was too low.
+
+**L7. Retrain the continuous model after every round.**
+Each round adds 5 new ground truth seeds. The model should be refitted immediately after results come in. R6 data is especially valuable because it extends the training range to 0.259.

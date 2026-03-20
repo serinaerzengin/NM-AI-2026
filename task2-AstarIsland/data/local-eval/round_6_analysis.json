@@ -1,0 +1,65 @@
+{
+  "round": 6,
+  "score": 62.31,
+  "rank": 74,
+  "total_teams": 186,
+  "seed_scores": [
+    63.71,
+    61.37,
+    60.33,
+    62.71,
+    63.44
+  ],
+  "approach": "quickstart.py with high-expansion priors (R1-fitted) + 1-obs-per-cell tiling + observation blending",
+  "regime_detection": {
+    "method": "count surviving initial settlements (4/12 = 33%)",
+    "classified_as": "medium (WRONG \u2014 was actually high)",
+    "resubmitted_as": "high-expansion priors",
+    "actual_settle_rate": 0.259,
+    "max_training_rate": 0.214,
+    "extrapolation": true
+  },
+  "errors_by_terrain": {
+    "forest": {
+      "impact": "5-6% of total score per seed",
+      "P_forest_diff": "+0.13 to +0.17 (over-predicted)",
+      "P_settle_diff": "-0.07 to -0.08 (under-predicted)",
+      "P_empty_diff": "-0.05 to -0.08 (under-predicted)",
+      "root_cause": "R6 settlements replaced forests more aggressively than R1 training data"
+    },
+    "plains_d0_3": {
+      "impact": "5-7% of total score per seed",
+      "P_settle_diff": "-0.05 to -0.11 (under-predicted)",
+      "P_empty_diff": "+0.09 to +0.12 (over-predicted)",
+      "root_cause": "Expansion rate higher than training range"
+    },
+    "plains_d4_plus": {
+      "impact": "3-5% of total score per seed",
+      "P_settle_diff": "-0.05 to -0.07 (under-predicted)",
+      "root_cause": "Far expansion underestimated \u2014 R6 had more chain expansion"
+    },
+    "init_settlements": {
+      "impact": "<1% of total score per seed",
+      "note": "GOOD \u2014 high-expansion priors matched well (diff < 0.03)"
+    },
+    "ruin": {
+      "impact": "~1% of total score",
+      "P_ruin_diff": "-0.01 to -0.02 everywhere",
+      "root_cause": "Floor 0.005 too low for ruin class in high-expansion rounds (GT had ~0.03)"
+    }
+  },
+  "lessons": [
+    "R6 settle_rate=0.259 was beyond training range (max 0.214). Linear model extrapolated poorly.",
+    "Forest cells are MORE dynamic than priors assumed \u2014 settlements aggressively replace forests in high-expansion rounds.",
+    "Ruin floor should be ~0.02 not 0.005 in high-expansion rounds.",
+    "Observation-based rate detection (22% from queries) was close to true rate (26%) but priors were still R1-fitted.",
+    "Need to use continuous model coefficients applied to OBSERVED rate, not pre-fitted regime priors."
+  ],
+  "improvements_for_next_round": [
+    "Use continuous rate model (Q46) with observed rate from queries",
+    "Increase ruin floor to 0.02 in high-expansion rounds",
+    "Train on R6 ground truth to expand training range to 0.26",
+    "Forest prior should scale more steeply with rate \u2014 forests are not as stable as assumed",
+    "Consider hybrid: static prior + simulator for spatial dynamics"
+  ]
+}

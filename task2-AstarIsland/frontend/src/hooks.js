@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback } from 'react'
-import { fetchRounds, fetchInitialState, fetchGroundTruth } from './api'
+import { fetchRounds, fetchInitialState, fetchGroundTruth, fetchPrediction, fetchObservations, fetchEvalData } from './api'
 
 export function useRounds() {
   const [rounds, setRounds] = useState([])
@@ -21,6 +21,8 @@ export function useRounds() {
 export function useSeedData(roundNumber, seedIndex) {
   const [initialState, setInitialState] = useState(null)
   const [groundTruth, setGroundTruth] = useState(null)
+  const [prediction, setPrediction] = useState(null)
+  const [observations, setObservations] = useState([])
   const [loading, setLoading] = useState(false)
 
   useEffect(() => {
@@ -29,12 +31,24 @@ export function useSeedData(roundNumber, seedIndex) {
     Promise.all([
       fetchInitialState(roundNumber, seedIndex),
       fetchGroundTruth(roundNumber, seedIndex),
-    ]).then(([init, gt]) => {
+      fetchPrediction(roundNumber, seedIndex),
+      fetchObservations(roundNumber, seedIndex),
+    ]).then(([init, gt, pred, obs]) => {
       setInitialState(init)
       setGroundTruth(gt)
+      setPrediction(pred)
+      setObservations(obs)
       setLoading(false)
     })
   }, [roundNumber, seedIndex])
 
-  return { initialState, groundTruth, loading }
+  return { initialState, groundTruth, prediction, observations, loading }
+}
+
+export function useEvalData() {
+  const [data, setData] = useState(null)
+  useEffect(() => {
+    fetchEvalData().then(setData)
+  }, [])
+  return data
 }

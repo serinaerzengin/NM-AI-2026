@@ -8,4 +8,5 @@ dependencies = [
     "requests",
     "numpy",
     "python-dotenv>=1.2.2",
+    "optuna>=4.8.0",
 ]
