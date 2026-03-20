@@ -1,8 +1,9 @@
 """Empirical bin predictor: use live observations to build per-bin distributions.
 
 For each observation, categorize cells by features (distance to settlement,
-coastal/inland, terrain type) and count outcome frequencies. This produces
-empirical distributions calibrated to the current round's hidden parameters.
+coastal/inland, terrain type, settlement density, map size) and count outcome
+frequencies. This produces empirical distributions calibrated to the current
+round's hidden parameters.
 """
 
 import numpy as np
@@ -24,62 +25,55 @@ _MOUNTAIN_IDX = FEATURE_NAMES.index("is_mountain")
 _OCEAN_IDX = FEATURE_NAMES.index("is_ocean")
 _SETTLEMENT_IDX = FEATURE_NAMES.index("is_initial_settlement")
 _SETTLE_R5_IDX = FEATURE_NAMES.index("settlements_r5")
-_ADJ_FOREST_IDX = FEATURE_NAMES.index("adjacent_forests")
+_TOTAL_IDX = FEATURE_NAMES.index("total_settlements")
 
 # Distance bins
 DIST_BINS = [(0, 0.5), (0.5, 1.5), (1.5, 2.5), (2.5, 4.5), (4.5, 7.5), (7.5, 99)]
 DIST_LABELS = ["d0", "d1", "d2", "d3-4", "d5-7", "d8+"]
 
-MIN_BIN_COUNT = 10  # Minimum observations per bin to trust empirical distribution
+MIN_BIN_COUNT = 10
+
+
+def _dist_label(dist: float) -> str:
+    for (lo, hi), label in zip(DIST_BINS, DIST_LABELS):
+        if lo <= dist < hi:
+            return label
+    return DIST_LABELS[-1]
 
 
 def _cell_bin_key(features: np.ndarray) -> str | None:
-    """Map a cell's features to a bin key. Returns None for static cells."""
+    """Fine bin key: distance × coastal × terrain × 3-level density × total settlements."""
     if features[_OCEAN_IDX] > 0.5 or features[_MOUNTAIN_IDX] > 0.5:
         return None
 
-    dist = features[_DIST_IDX]
-    is_coastal = features[_COASTAL_IDX] > 0.5
+    dist_label = _dist_label(features[_DIST_IDX])
+    coastal = "coast" if features[_COASTAL_IDX] > 0.5 else "inland"
     is_forest = features[_FOREST_IDX] > 0.5
     is_settlement = features[_SETTLEMENT_IDX] > 0.5
+    terrain = "forest" if is_forest else ("settle" if is_settlement else "plain")
 
-    # Settlement density bin (nearby settlements within r5)
-    settle_r5 = features[_SETTLE_R5_IDX]
-    density = "hi" if settle_r5 >= 3 else "lo"
+    sr5 = features[_SETTLE_R5_IDX]
+    density = "hi" if sr5 >= 4 else ("mid" if sr5 >= 2 else "lo")
 
-    # Find distance bin
-    dist_label = DIST_LABELS[-1]
-    for (lo, hi), label in zip(DIST_BINS, DIST_LABELS):
-        if lo <= dist < hi:
-            dist_label = label
-            break
+    total = "Thi" if features[_TOTAL_IDX] >= 40 else "Tlo"
 
-    coastal_str = "coast" if is_coastal else "inland"
-    terrain_str = "forest" if is_forest else ("settle" if is_settlement else "plain")
-
-    return f"{dist_label}_{coastal_str}_{terrain_str}_{density}"
+    return f"{dist_label}_{coastal}_{terrain}_{density}_{total}"
 
 
 def _cell_bin_key_coarse(features: np.ndarray) -> str | None:
-    """Coarser bin key (fallback when fine bin has too few observations)."""
+    """Coarse fallback: distance × coastal × terrain × binary density."""
     if features[_OCEAN_IDX] > 0.5 or features[_MOUNTAIN_IDX] > 0.5:
         return None
 
-    dist = features[_DIST_IDX]
-    is_coastal = features[_COASTAL_IDX] > 0.5
+    dist_label = _dist_label(features[_DIST_IDX])
+    coastal = "coast" if features[_COASTAL_IDX] > 0.5 else "inland"
     is_forest = features[_FOREST_IDX] > 0.5
     is_settlement = features[_SETTLEMENT_IDX] > 0.5
+    terrain = "forest" if is_forest else ("settle" if is_settlement else "plain")
 
-    dist_label = DIST_LABELS[-1]
-    for (lo, hi), label in zip(DIST_BINS, DIST_LABELS):
-        if lo <= dist < hi:
-            dist_label = label
-            break
+    density = "hi" if features[_SETTLE_R5_IDX] >= 3 else "lo"
 
-    coastal_str = "coast" if is_coastal else "inland"
-    terrain_str = "forest" if is_forest else ("settle" if is_settlement else "plain")
-
-    return f"C_{dist_label}_{coastal_str}_{terrain_str}"
+    return f"C_{dist_label}_{coastal}_{terrain}_{density}"
 
 
 def build_empirical_distributions(
@@ -93,16 +87,14 @@ def build_empirical_distributions(
         states: Initial map states (one per seed, indexed by Observation.seed_index).
 
     Returns:
-        Dict mapping bin_key → (NUM_CLASSES,) probability distribution.
+        Dict mapping bin_key -> (NUM_CLASSES,) probability distribution.
     """
-    # Precompute features for all maps
     feature_maps = {}
     for obs in observations:
         si = obs.seed_index
         if si not in feature_maps:
             feature_maps[si] = compute_features(states[si])
 
-    # Count outcomes per bin (fine and coarse)
     bin_counts = defaultdict(lambda: np.zeros(NUM_CLASSES, dtype=np.float64))
 
     for obs in observations:
@@ -120,17 +112,14 @@ def build_empirical_distributions(
                 terrain_code = int(obs.grid[r, c])
                 cls = TERRAIN_TO_CLASS.get(terrain_code, CLASS_EMPTY)
 
-                # Add to fine bin
                 fine_key = _cell_bin_key(cell_feats)
                 if fine_key is not None:
                     bin_counts[fine_key][cls] += 1
 
-                # Add to coarse bin (for fallback)
                 coarse_key = _cell_bin_key_coarse(cell_feats)
                 if coarse_key is not None:
                     bin_counts[coarse_key][cls] += 1
 
-    # Normalize to distributions
     bin_distributions = {}
     for key, counts in bin_counts.items():
         total = counts.sum()
@@ -214,8 +203,12 @@ def get_bin_coverage_stats(
                 if abs_y >= 40 or abs_x >= 40:
                     continue
                 cell_feats = feat_map[abs_y, abs_x]
-                bin_key = _cell_bin_key(cell_feats)
-                if bin_key is not None:
-                    bin_counts[bin_key] += 1
+                # Count for both fine and coarse (matches build_empirical_distributions)
+                fine_key = _cell_bin_key(cell_feats)
+                if fine_key is not None:
+                    bin_counts[fine_key] += 1
+                coarse_key = _cell_bin_key_coarse(cell_feats)
+                if coarse_key is not None:
+                    bin_counts[coarse_key] += 1
 
     return dict(bin_counts)
