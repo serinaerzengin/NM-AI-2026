@@ -1,0 +1,13 @@
+[project]
+name = "task1-tripletex"
+version = "0.1.0"
+description = "Tripletex AI Accounting Agent for NM i AI 2026"
+requires-python = ">=3.13"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "openai-agents",
+    "httpx",
+    "python-dotenv",
+    "litellm",
+]
