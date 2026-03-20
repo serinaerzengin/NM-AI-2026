@@ -4,8 +4,6 @@
 __pycache__
 *.pyc
 .DS_Store
-deploy.sh
-thomas/eval/
-thomas/.claude/
-thomas/test_claude.mjs
 uv.lock
+docs/
+specs/

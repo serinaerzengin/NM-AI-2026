@@ -241,3 +241,7 @@ task3-NorgesGruppen/logs/*
 # Optuna DBs and training runs
 *.db
 *.db-journal
+
+# Agent logs (keep directory, ignore contents)
+task1-Tripletex/logs/*
+!task1-Tripletex/logs/.gitkeep

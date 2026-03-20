@@ -7,9 +7,11 @@ load_dotenv()
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from thomas.agent import run
 
-logging.basicConfig(level=logging.INFO)
+from agent import run
+from agent.logging_config import setup_logging
+
+setup_logging()
 logger = logging.getLogger("tripletex-agent")
 
 app = FastAPI()

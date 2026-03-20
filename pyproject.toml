@@ -12,4 +12,5 @@ dependencies = [
     "iterative-stratification>=0.1.7",
     "ultralytics>=8.1.0",
     "torch>=2.0.0",
+    "fastapi>=0.135.1",
 ]

@@ -1,140 +1,90 @@
-# Task 1 — Tripletex AI Accounting Agent
+# Tripletex AI Accounting Agent
 
-AI agent that completes accounting tasks in Tripletex via the v2 REST API.
-
-## Stack
-
-- **LLM**: Gemini (via LiteLLM) — configurable in `thomas/agent.py`
-- **Framework**: OpenAI Agents SDK (Agent, Runner, function_tool)
-- **Tools**: 40 typed endpoints auto-generated from the Tripletex OpenAPI spec
-- **Skills**: Per-category API docs + language mappings + API reference
-- **Server**: FastAPI on Cloud Run
+AI agent for NM i AI 2026 — receives accounting task prompts in 7 languages and executes them via the Tripletex API.
 
 ## Setup
 
-### 1. Clone and install
-
 ```bash
-cd task1-Tripletex
 uv sync
 ```
 
-### 2. Configure `.env`
+## Run
 
 ```bash
-cp .env.example .env
+uv run uvicorn api:app --host 0.0.0.0 --port 8000
 ```
 
-Add your keys:
+## API Spec Extraction
+
+### The problem
+
+The Tripletex OpenAPI spec has 546 endpoints and is 3.5MB. That's way too large to put in an LLM context window. But our agent needs to know which endpoints exist and exactly which fields to send in each API call — otherwise it guesses, gets 422 errors, and loses efficiency points.
+
+### The solution: two files
+
+We extract the OpenAPI spec into two purpose-built files using `specs/build_registry.py`:
+
+#### `specs/index.md` (~800 lines, ~18K tokens)
+
+A markdown table with one line per endpoint. Just method, path, and a short summary.
 
 ```
-GEMINI_API_KEY=your-gemini-key        # From https://aistudio.google.com/apikey
-OPENAI_API_KEY=sk-...                  # Optional, if using OpenAI models
-PROJECT=your-gcp-project-id            # For Cloud Run deploy
-GOOGLE_MAIL=your@gcplab.me
-GOOGLE_PASSWORD=...
-
-# Sandbox (for local testing)
-TRIPLETEX_BASE_URL=https://kkpqfuj-amager.tripletex.dev/v2
-TRIPLETEX_SESSION_TOKEN=your-sandbox-token
+| POST | `/employee`              | Create one employee.                    |
+| GET  | `/customer`              | Find customers corresponding with data. |
+| PUT  | `/invoice/{id}/:payment` | Update invoice with payment information. |
 ```
 
-Get your sandbox credentials at https://app.ainm.no/submit/tripletex
+**How the agent uses it:** Always loaded in the system prompt. When the agent reads a task like "Opprett en ansatt med navn Ola Nordmann", it scans this index to find `POST /employee`. Think of it as a table of contents.
 
-### 3. Test locally
+#### `specs/registry.json` (~2MB)
+
+A JSON file where each key is `"METHOD /path"` and the value contains everything the agent needs to make that API call correctly:
+
+```json
+{
+  "POST /employee": {
+    "summary": "Create one employee.",
+    "tags": ["employee"],
+    "request_body": {
+      "properties": {
+        "firstName":  { "type": "string" },
+        "lastName":   { "type": "string" },
+        "email":      { "type": "string" },
+        "userType":   { "type": "string", "enum": ["STANDARD", "EXTENDED", "NO_ACCESS"] },
+        "department": { "type": "object", "properties": { "id": { "type": "integer" } }, "_ref": "Department" }
+      }
+    },
+    "response": { "type": "single", "schema_ref": "ResponseWrapperEmployee" }
+  }
+}
+```
+
+**How the agent uses it:** Loaded on-demand. After the agent picks `POST /employee` from the index, it loads this entry to know the exact fields, types, and enums to send. The `_ref` tells it that `department` is a link to another entity — just send `{"id": 123}`, not the full department object.
+
+**What's in each entry:**
+- `request_body` — The fields you can send in POST/PUT requests, with types and enums
+- `query_params` — The `?key=value` parameters for GET/action endpoints (search filters, pagination)
+- `response` — Whether the response wraps data in `.value` (single) or `.values` (list)
+- `content_type: "multipart/form-data"` — Present on file upload endpoints, marks which field is the binary upload
+
+### How the extraction works
+
+The raw OpenAPI spec uses `$ref` pointers everywhere (e.g. `"$ref": "#/components/schemas/Employee"`). We resolve these inline so the registry is self-contained. The key rules:
+
+- **Object `$ref`** (e.g. `customer` pointing to the Customer schema) → Stubbed to `{"id": <int>}`. When you link an entity in a Tripletex POST/PUT, you only send its ID, never the full object.
+- **Array `$ref`** (e.g. `orderLines` pointing to OrderLine schema) → Fully resolved. Arrays are inline child creations — the agent needs all writable fields (product, quantity, unitPrice, etc.).
+- **`readOnly` fields** → Stripped. These are server-generated (id, version, displayName) and must never be sent in requests.
+- **Circular references** → Detected via ancestor tracking, gracefully degraded to id-only stubs.
+- **Multipart/form-data** → Extracted separately for file upload endpoints, with binary fields clearly marked.
+
+### Rebuild
 
 ```bash
-# Quick test against sandbox
-source .env
-uv run python -c "
-import asyncio
-from thomas.agent import run
-asyncio.run(run(
-    prompt='Opprett en kunde med navn Test AS og e-post test@test.no.',
-    base_url='$TRIPLETEX_BASE_URL',
-    session_token='$TRIPLETEX_SESSION_TOKEN',
-))
-"
+uv run python specs/build_registry.py
 ```
 
-### 4. Run evals
+## Deploy
 
 ```bash
-# All 52 Tier 1 cases
-node thomas/eval/run_eval.mjs
-
-# Filter
-node thomas/eval/run_eval.mjs --category employee
-node thomas/eval/run_eval.mjs --lang de
-node thomas/eval/run_eval.mjs --limit 5
-node thomas/eval/run_eval.mjs --id t1_employee_01_nb
-```
-
-Requires `npm install @anthropic-ai/claude-agent-sdk dotenv` for the eval runner.
-
-### 5. Deploy to Cloud Run
-
-```bash
-# Authenticate with GCP
-gcloud auth login your@gcplab.me
-gcloud config set project $PROJECT
-
-# Deploy
 ./deploy.sh
 ```
-
-Submit the Cloud Run URL at https://app.ainm.no/submit/tripletex
-
-## Project structure
-
-```
-├── api.py                  # FastAPI /solve + /health endpoint
-├── Dockerfile              # Cloud Run container
-├── deploy.sh               # One-command deploy
-├── core/
-│   └── openapi_tools.py    # 40 typed tools from OpenAPI spec
-├── thomas/
-│   ├── agent.py            # Agent: system prompt + model + tools
-│   ├── skills/             # Skill files (API docs per category)
-│   │   ├── api-reference.md    # Auth, fields, sorting, errors
-│   │   ├── languages.md        # 7-language term mappings
-│   │   ├── employee.md         # Employee endpoints + examples
-│   │   ├── customer.md         # Customer endpoints + examples
-│   │   └── ...                 # product, invoice, order, etc.
-│   └── eval/
-│       ├── tier1_cases.jsonl   # 52 test cases
-│       └── run_eval.mjs        # Eval runner
-└── docs/
-    ├── openapi.json            # Full Tripletex API spec (3.5MB)
-    └── api-map.md              # Endpoint summary
-```
-
-## How it works
-
-1. `/solve` receives a task prompt + Tripletex credentials
-2. Agent gets 40 typed tools (create_employee, search_customers, etc.)
-3. Skills are loaded as tool descriptions so the LLM knows field names and examples
-4. System prompt includes API reference (auth, errors, patterns) and language mappings
-5. Agent parses the prompt, calls the right tools, returns `{"status": "completed"}`
-
-## Switching models
-
-Edit `thomas/agent.py` line 9:
-
-```python
-# Gemini
-MODEL = LitellmModel(model="gemini/gemini-3-flash-preview")
-
-# OpenAI
-MODEL = LitellmModel(model="gpt-4o-mini")
-
-# Any LiteLLM-supported model
-MODEL = LitellmModel(model="anthropic/claude-sonnet-4-20250514")
-```
-
-## Adding a new approach
-
-1. Create a folder: `mkdir my_approach`
-2. Add `my_approach/agent.py` with an `async def run(prompt, base_url, session_token, files)` function
-3. Update `api.py`: `from my_approach.agent import run`
-4. Redeploy
