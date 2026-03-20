@@ -15,7 +15,7 @@ from .types import (
 )
 from .features import compute_features, FEATURE_NAMES
 
-PROB_FLOOR = 0.01
+PROB_FLOOR = 0.001
 
 # Feature indices
 _DIST_IDX = FEATURE_NAMES.index("dist_nearest_settlement")
