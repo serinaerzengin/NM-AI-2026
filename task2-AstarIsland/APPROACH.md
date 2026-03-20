@@ -4,16 +4,16 @@
 
 Two-layer prediction: XGBoost base model for general patterns + empirical bins from live observations for round-specific calibration.
 
-**Validated scores:**
-- Round 6: 87.1 (first place was 88.5)
-- Round 7: 72.4
+**Validated scores (no data leakage — held-out evaluation):**
+- Round 6: 87.1 (trained on R1-5, first place was 88.5)
+- Round 7: 72.4 (trained on R1-6)
 - Average: 79.7
 
 ---
 
 ## Layer 1: XGBoost Base Model
 
-Trained on all historical ground truth (rounds 1-7, 35 maps). Predicts a 6-class probability distribution per cell.
+For each live round, trains on all COMPLETED rounds (never the current one). Predicts a 6-class probability distribution per cell. For round 8: trained on rounds 1-7 (35 maps). For round 9: will train on rounds 1-8 (40 maps).
 
 ### Features per cell (28 total)
 
