@@ -7,7 +7,7 @@ load_dotenv()
 
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
-from thomas.agent import run
+# TODO import agent from .agent import run
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("tripletex-agent")
