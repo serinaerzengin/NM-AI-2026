@@ -210,3 +210,8 @@ raw/
 processed/
 .DS_Store
 task3-NorgesGruppen/data/*
+task2-AstarIsland/CLAUDE.md
+.claude/settings.local.json
+task3-NorgesGruppen/outputs_dinov2_detr/*
+task2-AstarIsland/data/*
+catboost_info/
