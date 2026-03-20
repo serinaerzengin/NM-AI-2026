@@ -1,4 +1,4 @@
-import { useRef, useEffect, useState } from 'react'
+import { useRef, useEffect, useState, useCallback } from 'react'
 import { TERRAIN_COLORS, CLASS_COLORS, CLASS_NAMES } from '../constants'
 
 const CELL_SIZE = 12
@@ -16,21 +16,28 @@ function probToColor(probs) {
   return `rgb(${Math.round(r)},${Math.round(g)},${Math.round(b)})`
 }
 
-// Prediction grid: argmax class colored, dimmed by confidence
 function predictionColor(classIdx, confidence) {
   const hex = CLASS_COLORS[classIdx] || '#6b7280'
   const r = parseInt(hex.slice(1, 3), 16)
   const g = parseInt(hex.slice(3, 5), 16)
   const b = parseInt(hex.slice(5, 7), 16)
-  const a = 0.3 + confidence * 0.7 // dim = uncertain
+  const a = 0.3 + confidence * 0.7
   return `rgba(${r},${g},${b},${a})`
 }
 
-export default function GridView({ grid, groundTruth, prediction, observations, title }) {
+export default function GridView({ grid, groundTruth, prediction, observations, visibleObsCount, title }) {
   const canvasRef = useRef(null)
   const [tooltip, setTooltip] = useState(null)
 
   const height = 40, width = 40
+
+  // Sort observations by queriesUsed for consistent ordering
+  const sortedObs = observations && observations.length > 0
+    ? [...observations].sort((a, b) => (a.queriesUsed || 0) - (b.queriesUsed || 0))
+    : []
+
+  // How many to show: if visibleObsCount is provided, slice; otherwise show all
+  const shownObs = visibleObsCount != null ? sortedObs.slice(0, visibleObsCount) : sortedObs
 
   useEffect(() => {
     const canvas = canvasRef.current
@@ -52,14 +59,24 @@ export default function GridView({ grid, groundTruth, prediction, observations, 
       }
     }
 
-    // Observation coverage overlay (translucent border)
-    if (observations && observations.length > 0) {
-      ctx.strokeStyle = 'rgba(88, 166, 255, 0.6)'
-      ctx.lineWidth = 1.5
-      for (const obs of observations) {
+    // Observation coverage overlay
+    if (shownObs.length > 0) {
+      const lastIdx = shownObs.length - 1
+      for (let i = 0; i < shownObs.length; i++) {
+        const obs = shownObs[i]
         const h = obs.grid.length
         const w = obs.grid[0].length
+        const isLatest = i === lastIdx
+
+        // Dim older ones, highlight the latest
+        ctx.strokeStyle = isLatest ? 'rgba(88, 166, 255, 0.9)' : 'rgba(88, 166, 255, 0.3)'
+        ctx.lineWidth = isLatest ? 2.5 : 1
         ctx.strokeRect(obs.x * CELL_SIZE, obs.y * CELL_SIZE, w * CELL_SIZE, h * CELL_SIZE)
+
+        // Number label
+        ctx.fillStyle = isLatest ? 'rgba(88, 166, 255, 0.9)' : 'rgba(88, 166, 255, 0.5)'
+        ctx.font = `bold ${isLatest ? 11 : 9}px sans-serif`
+        ctx.fillText(`${i + 1}`, obs.x * CELL_SIZE + 3, obs.y * CELL_SIZE + (isLatest ? 13 : 10))
       }
     }
 
@@ -72,7 +89,7 @@ export default function GridView({ grid, groundTruth, prediction, observations, 
     for (let x = 0; x <= width; x++) {
       ctx.beginPath(); ctx.moveTo(x * CELL_SIZE, 0); ctx.lineTo(x * CELL_SIZE, height * CELL_SIZE); ctx.stroke()
     }
-  }, [grid, groundTruth, prediction, observations])
+  }, [grid, groundTruth, prediction, shownObs])
 
   function handleMouseMove(e) {
     const rect = canvasRef.current.getBoundingClientRect()

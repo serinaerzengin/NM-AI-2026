@@ -67,7 +67,7 @@ function dataApiPlugin() {
             const m = f.match(/obs_(\d+)_(\d+)\.json/)
             if (!m) return null
             const data = JSON.parse(fs.readFileSync(path.join(obsDir, f), 'utf-8'))
-            return { y: parseInt(m[1]), x: parseInt(m[2]), file: f, grid: data.grid, settlements: data.settlements }
+            return { y: parseInt(m[1]), x: parseInt(m[2]), file: f, grid: data.grid, settlements: data.settlements, queriesUsed: data.queries_used, viewport: data.viewport }
           })
           .filter(Boolean)
         res.setHeader('Content-Type', 'application/json')

@@ -99,29 +99,58 @@ def save_observation(
 ) -> None:
     """Save a simulation observation keyed by viewport coordinates.
 
+    Each coordinate stores a list of observations (different seeds produce
+    different results for the same viewport).
     result should contain: grid, settlements, viewport, queries_used, queries_max.
     """
     vx, vy = viewport["x"], viewport["y"]
     fname = f"obs_{vx}_{vy}.json"
-    _write_json(_obs_dir(round_number, seed_index) / fname, result)
+    path = _obs_dir(round_number, seed_index) / fname
+
+    existing = _read_json(path)
+    if existing is None:
+        observations = []
+    elif isinstance(existing, list):
+        observations = existing
+    else:
+        # Legacy format: single dict — wrap in a list
+        observations = [existing]
+
+    observations.append(result)
+    _write_json(path, observations)
 
 
 def load_observation(
     round_number: int, seed_index: int, viewport_x: int, viewport_y: int
-) -> Optional[dict]:
+) -> list[dict]:
+    """Load all observations for a specific viewport coordinate."""
     fname = f"obs_{viewport_x}_{viewport_y}.json"
-    return _read_json(_obs_dir(round_number, seed_index) / fname)
+    data = _read_json(_obs_dir(round_number, seed_index) / fname)
+    if data is None:
+        return []
+    if isinstance(data, list):
+        return data
+    # Legacy format: single dict
+    return [data]
 
 
 def list_observations(round_number: int, seed_index: int) -> list[dict]:
-    """Load all observations for a seed, sorted by filename."""
+    """Load all observations for a seed, sorted by filename.
+
+    Each file may contain multiple observations (list); legacy files with a
+    single dict are handled transparently.
+    """
     obs_path = _obs_dir(round_number, seed_index)
     if not obs_path.exists():
         return []
     results = []
     for f in sorted(obs_path.glob("obs_*.json")):
         data = json.loads(f.read_text())
-        results.append(data)
+        if isinstance(data, list):
+            results.extend(data)
+        else:
+            # Legacy format: single dict
+            results.append(data)
     return results
 
 

@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect, useRef, useCallback } from 'react'
 import { useRounds, useSeedData } from './hooks'
 import GridView from './components/GridView'
 import { TerrainLegend, ClassLegend } from './components/GridLegend'
@@ -6,11 +6,70 @@ import StatsPanel from './components/StatsPanel'
 import CrossRoundCharts from './components/CrossRoundCharts'
 import ScoresPanel from './components/ScoresPanel'
 
+function ObsPlayback({ totalObs, visibleCount, setVisibleCount }) {
+  const [playing, setPlaying] = useState(false)
+  const intervalRef = useRef(null)
+
+  const stop = useCallback(() => {
+    setPlaying(false)
+    if (intervalRef.current) { clearInterval(intervalRef.current); intervalRef.current = null }
+  }, [])
+
+  const play = useCallback(() => {
+    stop()
+    setPlaying(true)
+    setVisibleCount(0)
+    intervalRef.current = setInterval(() => {
+      setVisibleCount(prev => {
+        if (prev >= totalObs) { stop(); return totalObs }
+        return prev + 1
+      })
+    }, 600)
+  }, [totalObs, setVisibleCount, stop])
+
+  useEffect(() => { return () => { if (intervalRef.current) clearInterval(intervalRef.current) } }, [])
+
+  return (
+    <div style={{ marginTop: 8, display: 'flex', alignItems: 'center', gap: 10 }}>
+      <button
+        onClick={playing ? stop : play}
+        style={{
+          background: playing ? '#ef4444' : '#58a6ff', color: '#fff', border: 'none',
+          borderRadius: 6, padding: '4px 12px', cursor: 'pointer', fontSize: '0.85rem', fontWeight: 600,
+        }}
+      >
+        {playing ? 'Stop' : 'Play'}
+      </button>
+      <button
+        onClick={() => { stop(); setVisibleCount(Math.max(0, visibleCount - 1)) }}
+        style={{ background: '#21262d', color: '#e1e4e8', border: '1px solid #30363d', borderRadius: 6, padding: '4px 8px', cursor: 'pointer', fontSize: '0.85rem' }}
+      >
+        &#9664;
+      </button>
+      <input
+        type="range" min={0} max={totalObs} value={visibleCount}
+        onChange={e => { stop(); setVisibleCount(+e.target.value) }}
+        style={{ flex: 1, accentColor: '#58a6ff' }}
+      />
+      <button
+        onClick={() => { stop(); setVisibleCount(Math.min(totalObs, visibleCount + 1)) }}
+        style={{ background: '#21262d', color: '#e1e4e8', border: '1px solid #30363d', borderRadius: 6, padding: '4px 8px', cursor: 'pointer', fontSize: '0.85rem' }}
+      >
+        &#9654;
+      </button>
+      <span style={{ color: '#8b949e', fontSize: '0.85rem', minWidth: 55, textAlign: 'right' }}>
+        {visibleCount} / {totalObs}
+      </span>
+    </div>
+  )
+}
+
 function App() {
   const { rounds, loading, reload } = useRounds()
   const [selectedRound, setSelectedRound] = useState(null)
   const [selectedSeed, setSelectedSeed] = useState(0)
   const [tab, setTab] = useState('round')
+  const [visibleObsCount, setVisibleObsCount] = useState(null) // null = show all
 
   const round = selectedRound != null
     ? rounds.find(r => r.round_number === selectedRound)
@@ -19,6 +78,12 @@ function App() {
   const roundNumber = round?.round_number
   const seedInfo = round?.seeds?.find(s => s.index === selectedSeed)
   const { initialState, groundTruth, prediction, observations, loading: seedLoading } = useSeedData(roundNumber, selectedSeed)
+
+  // Reset obs playback when seed/round changes
+  useEffect(() => {
+    if (observations.length > 0) setVisibleObsCount(observations.length)
+    else setVisibleObsCount(null)
+  }, [observations])
 
   if (!loading && rounds.length > 0 && selectedRound == null) {
     setSelectedRound(rounds[0].round_number)
@@ -116,13 +181,16 @@ function App() {
                     <GridView
                       grid={initialState.grid}
                       observations={observations}
+                      visibleObsCount={visibleObsCount}
                       title="Initial State"
                     />
                     <TerrainLegend />
                     {observations.length > 0 && (
-                      <p style={{ color: '#58a6ff', fontSize: '0.8rem', marginTop: 4 }}>
-                        Blue rectangles = observation viewports ({observations.length} queries)
-                      </p>
+                      <ObsPlayback
+                        totalObs={observations.length}
+                        visibleCount={visibleObsCount ?? observations.length}
+                        setVisibleCount={setVisibleObsCount}
+                      />
                     )}
                   </div>
                 )}
