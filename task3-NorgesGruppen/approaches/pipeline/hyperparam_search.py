@@ -32,40 +32,23 @@ EPOCHS = 60
 FOLD_IDX = 0
 
 
-def get_winning_model() -> str:
-    """Load the winning model from Phase 2."""
-    cmp_path = RESULTS_DIR / "model_comparison.json"
-    if cmp_path.exists():
-        with open(cmp_path) as f:
-            data = json.load(f)
-        winner = data["winner"]
-        for m in data["models"]:
-            if m["model"] == winner:
-                return m["weights"]
-
-    print("WARNING: No model_comparison.json found, defaulting to yolov8x.pt")
-    return "yolov8x.pt"
+def get_model() -> str:
+    """Return the chosen model weights."""
+    return "rtdetrv2-x.pt"
 
 
 def get_best_augmentation() -> dict:
-    """Load best augmentation config from Phase 1."""
-    aug_path = RESULTS_DIR / "aug_search_best.json"
-    if aug_path.exists():
-        with open(aug_path) as f:
-            return json.load(f)["best_params"]
+    """Return best augmentation config from Phase 1 aug search.
 
-    print("WARNING: No aug_search_best.json found, using defaults")
+    Score: 0.6364 with yolov8s.
+    """
     return {
-        "mosaic": 1.0,
-        "mixup": 0.1,
-        "copy_paste": 0.0,
-        "scale": 0.5,
-        "degrees": 5.0,
-        "hsv_h": 0.015,
-        "hsv_s": 0.7,
-        "hsv_v": 0.4,
-        "erasing": 0.4,
-        "close_mosaic": 10,
+        "mosaic": 0.5,
+        "scale": 0.21,
+        "degrees": 9.6,
+        "erasing": 0.34,
+        "close_mosaic": 15,
+        "imgsz": 1280,
     }
 
 
@@ -96,10 +79,10 @@ def objective(trial: optuna.Trial, model_weights: str, aug_params: dict,
     train_ids = fold["train"]
     val_ids = fold["val"]
 
-    # Merge aug params (without imgsz/close_mosaic — those come from hp or aug)
     aug = aug_params.copy()
-    close_mosaic = aug.pop("close_mosaic", 10)
+    close_mosaic = aug.pop("close_mosaic", 15)
     aug.pop("imgsz", None)  # Use HP search imgsz
+    aug.pop("crop_mode", None)  # Not an ultralytics param
 
     # Extract HP-specific params
     imgsz = hp.pop("imgsz")
@@ -178,7 +161,7 @@ def main():
     args = parser.parse_args()
 
     splits = load_kfold_splits(Path(args.splits) if args.splits else None)
-    model_weights = get_winning_model()
+    model_weights = get_model()
     aug_params = get_best_augmentation()
     worker_id = get_slurm_array_task_id()
 

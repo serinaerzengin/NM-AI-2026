@@ -23,42 +23,26 @@ MODEL_OUTPUT = TASK_DIR / "models"
 
 def load_full_config() -> dict:
     """Load and merge best configs from all phases."""
-    # Best augmentation
-    aug_path = RESULTS_DIR / "aug_search_best.json"
-    if aug_path.exists():
-        with open(aug_path) as f:
-            aug = json.load(f)["best_params"]
-    else:
-        print("WARNING: Using default augmentation")
-        aug = {
-            "mosaic": 1.0, "mixup": 0.1, "copy_paste": 0.0,
-            "scale": 0.5, "degrees": 5.0,
-            "hsv_h": 0.015, "hsv_s": 0.7, "hsv_v": 0.4,
-            "erasing": 0.4, "close_mosaic": 10,
-        }
+    # Best augmentation (from Phase 1 aug search, score=0.6364)
+    aug = {
+        "mosaic": 0.5,
+        "scale": 0.21,
+        "degrees": 9.6,
+        "erasing": 0.34,
+        "close_mosaic": 15,
+        "imgsz": 1280,
+    }
 
-    # Best model
-    cmp_path = RESULTS_DIR / "model_comparison.json"
-    if cmp_path.exists():
-        with open(cmp_path) as f:
-            cmp = json.load(f)
-        winner = cmp["winner"]
-        model_weights = None
-        for m in cmp["models"]:
-            if m["model"] == winner:
-                model_weights = m["weights"]
-                break
-    else:
-        print("WARNING: Using default model yolov8x.pt")
-        model_weights = "yolov8x.pt"
+    # Model: RTDETRv2-x (best mAP on COCO benchmarks)
+    model_weights = "rtdetrv2-x.pt"
 
-    # Best hyperparameters
+    # Best hyperparameters from Phase 3 Optuna search
     hp_path = RESULTS_DIR / "best_hyperparams.json"
     if hp_path.exists():
         with open(hp_path) as f:
             hp = json.load(f)["best_params"]
     else:
-        print("WARNING: Using default hyperparameters")
+        print("WARNING: No best_hyperparams.json found, using defaults")
         hp = {
             "lr0": 0.01, "lrf": 0.01, "weight_decay": 0.0005,
             "batch": 8, "imgsz": 1280,
@@ -99,6 +83,7 @@ def main():
     batch = hp.pop("batch", 8)
     aug.pop("close_mosaic", None)  # Override with longer close_mosaic for final training
     aug.pop("imgsz", None)
+    aug.pop("crop_mode", None)  # Not an ultralytics param
 
     # Use close_mosaic = 30 for final training (last 30 epochs without mosaic)
     final_close_mosaic = 30
