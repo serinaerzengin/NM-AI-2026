@@ -208,7 +208,16 @@ def main():
 
         # Blend with empirical bins
         if bin_dists:
-            k = best_params.get("k", 150) if best_params else 150
+            # Adaptive k: low-activity rounds → trust bins more (lower k)
+            base_k = best_params.get("k", 150) if best_params else 150
+            settle_rate = combined_round_stats.settlement_rate
+            if settle_rate < 0.05:
+                k = 50  # Low activity: bins are very reliable
+            elif settle_rate < 0.10:
+                k = min(base_k, 100)
+            else:
+                k = base_k
+            print(f"    k={k:.0f} (settle_rate={settle_rate:.3f})")
             final_pred = predict_with_empirical_bins(
                 state, bin_dists, base_pred, bin_counts=bin_counts, k=k
             )
