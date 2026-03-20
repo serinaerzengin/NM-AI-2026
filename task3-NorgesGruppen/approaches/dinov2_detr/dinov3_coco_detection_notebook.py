@@ -15,11 +15,11 @@ DATA_DIR = "./data/raw/train"
 OUTPUT_DIR = "./outputs_dinov2_detr"
 VAL_RATIO = 0.1
 EPOCHS = 200
-BATCH_SIZE = 64
+BATCH_SIZE = 32
 NUM_WORKERS = 16
 LR_1 = 1e-4
 LR_BACKBONE = 1e-5
-MAX_SIZE = 384
+MAX_SIZE = 512
 SEED = 42
 
 def set_seed(seed=42):
@@ -48,9 +48,9 @@ class CocoDetDataset(Dataset):
         image_processor=None,
         indices=None,
         augment=False,
-        max_size=384,
+        max_size=MAX_SIZE,
         sliding_window=False,
-        window_size=384,
+        window_size=MAX_SIZE,
         stride=256,
     ):
         self.root = Path(root)
@@ -89,7 +89,7 @@ class CocoDetDataset(Dataset):
             [
                 A.RandomResizedCrop(
                     size=(max_size, max_size),
-                    scale=(0.04, 0.25),
+                    scale=(0.5, 1),
                     p=1,
                 ),
                 A.HorizontalFlip(p=0.5),
@@ -103,12 +103,15 @@ class CocoDetDataset(Dataset):
                 A.RandomBrightnessContrast(p=0.7),
                 A.ElasticTransform(),
                 A.GaussianBlur(),
+                A.ColorJitter(),
+                A.ToGray(p=0.25),
+                A.ToSepia(p=0.1),
             ],
             bbox_params=A.BboxParams(format="coco", label_fields=["class_labels"]),
         )
 
         self.val_tf = A.Compose(
-            [],
+            [A.Resize(height=MAX_SIZE, width=MAX_SIZE)],
             bbox_params=A.BboxParams(format="coco", label_fields=["class_labels"]),
         )
 
