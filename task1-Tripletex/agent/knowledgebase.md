@@ -400,9 +400,10 @@ Do NOT include `countryCode` — the sandbox may not have countries enabled.
 **Key rules:**
 - Postings MUST balance to zero (sum of all amounts = 0)
 - Debit amounts are positive, credit amounts are negative
-- Each posting needs at minimum: `account: {"id": <id>}`, `amount`
-- Get account by number: `GET /ledger/account?number=<num>`
-- Get voucher type: `GET /ledger/voucherType`
+- Each posting needs at minimum: `account: {"id": <id>}`, `amount`, `row` (starting from 1)
+- **CRITICAL: Include `row` on every posting, starting at 1.** Row 0 is reserved for system-generated postings. Without row numbers, Tripletex rejects the voucher.
+- Get account by number: `GET /ledger/account?number=<num>` (use `number` param, NOT `numberFrom`/`numberTo`)
+- Get voucher type: `GET /ledger/voucherType` — use the first available type
 
 **Example:**
 ```json
@@ -411,8 +412,8 @@ Do NOT include `countryCode` — the sandbox may not have countries enabled.
   "description": "Description here",
   "voucherType": {"id": "<voucher_type_id>"},
   "postings": [
-    {"account": {"id": "<debit_account_id>"}, "amount": 25000},
-    {"account": {"id": "<credit_account_id>"}, "amount": -25000}
+    {"account": {"id": "<debit_account_id>"}, "amount": 25000, "row": 1},
+    {"account": {"id": "<credit_account_id>"}, "amount": -25000, "row": 2}
   ]
 }
 ```

@@ -289,7 +289,7 @@ def _sanitize_step(path: str, method: str, payload: dict | None,
             params["invoiceDate"] = TODAY
         payload = None  # Never takes a body
 
-    # ── Voucher: whitelist posting fields, ensure date ──
+    # ── Voucher: whitelist posting fields, assign row numbers, ensure date ──
     elif "/voucher" in path and method == "POST" and payload and isinstance(payload, dict):
         postings = payload.get("postings")
         if postings and isinstance(postings, list):
@@ -299,6 +299,9 @@ def _sanitize_step(path: str, method: str, payload: dict | None,
                     filtered = {k: v for k, v in p.items() if k in _VOUCHER_POSTING_FIELDS}
                     if filtered.get("account") and filtered.get("amount") is not None:
                         clean.append(filtered)
+            # CRITICAL: Assign row numbers starting at 1 (row 0 is reserved for system-generated)
+            for idx, posting in enumerate(clean):
+                posting["row"] = idx + 1
             payload["postings"] = clean
         if "date" not in payload:
             payload["date"] = TODAY
