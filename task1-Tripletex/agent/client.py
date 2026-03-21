@@ -114,12 +114,32 @@ class TripletexClient:
                     if short != alias:
                         self.state[f"{short}_{key}_id"] = value["id"]
 
+    @staticmethod
+    def _normalize_key(key: str) -> str:
+        """Normalize LLM-generated placeholder keys.
+
+        The LLM often generates keys like 'get_customer_values_0_id' or
+        'post_employee_value_id' referencing raw API response structure.
+        Our state stores flat keys like 'get_customer_0_id'. Normalize to match.
+        """
+        import re
+        # Remove _value_ (single entity response) → e.g. post_employee_value_id → post_employee_id
+        key = re.sub(r'_value_', '_', key)
+        # Remove _values_N_ (list response) → e.g. get_customer_values_0_id → get_customer_0_id
+        key = re.sub(r'_values_(\d+)_', r'_\1_', key)
+        return key
+
     def resolve(self, payload):
         """Replace $placeholder strings with state values, preserving types."""
         if isinstance(payload, str):
             # Exact match → return actual type
             if payload.startswith("$") and payload[1:] in self.state:
                 return self.state[payload[1:]]
+            # Try normalized key
+            if payload.startswith("$"):
+                norm = self._normalize_key(payload[1:])
+                if norm in self.state:
+                    return self.state[norm]
             # Inline replacement
             if "$" in payload:
                 result = payload
@@ -127,6 +147,13 @@ class TripletexClient:
                     ph = f"${key}"
                     if ph in result:
                         result = result.replace(ph, str(self.state[key]))
+                # If still has $placeholders, try normalized versions
+                if "$" in result:
+                    import re
+                    for match in re.findall(r'\$([a-zA-Z][a-zA-Z0-9_]+)', result):
+                        norm = self._normalize_key(match)
+                        if norm in self.state:
+                            result = result.replace(f"${match}", str(self.state[norm]))
                 return result
             return payload
         if isinstance(payload, dict):
