@@ -66,11 +66,12 @@ RULES:
 - Path should NOT include /v2 prefix.
 - For PUT/DELETE with IDs, use placeholders: "/customer/$customer_id".
 - CRITICAL — GET vs POST decision:
-  * If the task says "Register hours for X" / "Run payroll for X" / "X has an invoice" / "payment from X" → X ALREADY EXISTS. Use ONLY GET to find them. Do NOT plan a POST step.
-  * Only POST to create entities the task explicitly asks to CREATE (e.g. "Create employee", "Opprett kunde").
-  * When in doubt, use GET only. The sandbox has the entities pre-created.
+  * Customers/employees/suppliers mentioned as CONTEXT (e.g. "for customer X", "hours for Y", "payment from Z") → ALREADY EXIST. Use GET only.
+  * Products needed for orders/invoices → ALWAYS POST to create them (products are task-specific and don't pre-exist).
+  * Only POST customers/employees/suppliers when the task explicitly says to CREATE them.
+- CRITICAL — Invoice creation: ALWAYS use PUT /order/$order_id/:invoice with params invoiceDate=today. NEVER use POST /invoice.
 - FOLLOW knowledge base workflows when they match.
-- Minimize API calls — fewer = higher score. Every unnecessary POST wastes time and may fail.
+- Minimize API calls — fewer = higher score.
 
 Respond with valid JSON only. No markdown, no explanation."""
 
