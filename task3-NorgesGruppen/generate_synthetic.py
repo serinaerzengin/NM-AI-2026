@@ -27,7 +27,7 @@ IMAGES_DIR = COCO_DIR / "images"
 CUTOUT_CACHE = ROOT / "data" / "product_cutouts"
 EMPTY_SHELVES_DIR = ROOT / "data" / "empty_shelves"
 
-NUM_VARIANTS = 3             # synthetic variants per real image
+NUM_VARIANTS = 18            # synthetic variants per real image (~2200 total)
 ROTATION_RANGE = 5           # ±5 degrees
 BRIGHTNESS_RANGE = 0.10      # ±10% brightness
 BLUR_SIGMA = (0.3, 0.8)      # Gaussian blur range for pasted products
