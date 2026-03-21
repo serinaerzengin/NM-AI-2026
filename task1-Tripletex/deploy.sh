@@ -21,7 +21,7 @@ gcloud run deploy tripletex-agent \
   --timeout 300 \
   --concurrency 10 \
   --max-instances 5 \
-  --set-env-vars "GEMINI_API_KEY=$GEMINI_API_KEY,OPENAI_API_KEY=$OPENAI_API_KEY"
+  --set-env-vars "GEMINI_API_KEY=$GEMINI_API_KEY,LLM_MODEL=${LLM_MODEL:-gemini-3.1-pro-preview}"
 
 echo ""
 echo "Done! Submit your URL at https://app.ainm.no/submit/tripletex"
