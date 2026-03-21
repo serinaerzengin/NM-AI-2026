@@ -263,6 +263,25 @@ For supplier invoices: `POST /supplierInvoice/{invoiceId}/:addPayment`
 - The `date` should be the last day of the salary month.
 - Use `generateTaxDeduction=true` query parameter to auto-calculate tax.
 
+**FALLBACK — If salary API fails (no employment, validation error):**
+Use manual vouchers on salary accounts (5000-series) to record the payroll cost:
+1. `GET /ledger/account?numberFrom=5000&numberTo=5000` — get salary expense account ID
+2. `GET /ledger/account?numberFrom=1920&numberTo=1920` — get bank account ID
+3. `GET /ledger/voucherType` — get voucher type ID
+4. `POST /ledger/voucher` with:
+```json
+{
+  "date": "<last_day_of_month>",
+  "description": "Lønn <employee_name>",
+  "voucherType": {"id": "<vt_id>"},
+  "postings": [
+    {"account": {"id": "<salary_5000_id>"}, "amount": <total_salary>},
+    {"account": {"id": "<bank_1920_id>"}, "amount": -<total_salary>}
+  ]
+}
+```
+This records salary as an expense. Use the total of base salary + bonus as the amount.
+
 ---
 
 ## Travel Expense
