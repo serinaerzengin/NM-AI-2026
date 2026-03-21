@@ -15,17 +15,26 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "tripletex_get",
-            "description": "GET request to Tripletex API. Returns JSON response with status and data.",
+            "description": """GET request to Tripletex API.
+Key patterns:
+- /customer?organizationNumber=X, /supplier?organizationNumber=X, /employee?email=X — find existing entities
+- /ledger/account?number=N1,N2,N3 — batch lookup accounts (ALWAYS batch, never one at a time)
+- /ledger/posting?dateFrom=X&dateTo=Y — REQUIRES dateFrom+dateTo always
+- /invoice?customerId=X&invoiceDateFrom=2020-01-01&invoiceDateTo=2030-01-01 — REQUIRES date range
+- /ledger/voucherType, /invoice/paymentType, /salary/type — lookup reference data
+- /balanceSheet?dateFrom=X&dateTo=Y — REQUIRES dateFrom+dateTo
+- /department, /division — lookup org structure
+- /travelExpense/costCategory, /travelExpense/rateCategory?type=PER_DIEM&isValidDomestic=true&dateFrom=X&dateTo=Y""",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "API path, e.g. /customer or /employee/123",
+                        "description": "API path, e.g. /customer or /ledger/account?number=1920,2400,6300",
                     },
                     "params": {
                         "type": "string",
-                        "description": 'Query parameters as JSON string, e.g. \'{"name": "Ola"}\'',
+                        "description": 'Query parameters as JSON string, e.g. \'{"organizationNumber": "912345678"}\'',
                     },
                 },
                 "required": ["path"],
@@ -36,13 +45,25 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "tripletex_post",
-            "description": "POST request to Tripletex API. Creates a new resource.",
+            "description": """POST request to Tripletex API. Creates new resources.
+Key workflows:
+- Employee: POST /employee {firstName,lastName,email,dateOfBirth,userType:"EXTENDED",department:{id}} → POST /employee/entitlement {employee:{id},customer:{id:companyId},entitlementId:1} for admin → POST /employee/employment {employee:{id},division:{id},startDate} → POST /employee/employment/details {employment:{id},annualSalary,percentageOfFullTimeEquivalent}
+- Customer: POST /customer {name,isCustomer:true,email,organizationNumber,postalAddress:{...},physicalAddress:{...}}
+- Supplier: POST /supplier {name,isSupplier:true,organizationNumber,postalAddress:{...},physicalAddress:{...}}
+- Product: POST /product {name,number(STRING),priceExcludingVatCurrency,vatType:{id}}
+- Order: POST /order {customer:{id},orderDate,deliveryDate(required),orderLines:[{product:{id},count}]} — NO vatType on orderLines
+- Voucher: POST /ledger/voucher {date,description(required),voucherType:{id},postings:[{account:{id},amountGross,amountGrossCurrency,row(from 1)}]} — postings MUST sum to 0
+- Salary: POST /salary/transaction {date,year,month,payslips:[{employee:{id},date,year,month,specifications:[{salaryType:{id},rate(not amount),count}]}]}
+- Division: POST /division {name,startDate,organizationNumber(random 9-digit),municipalityDate,municipality:{id:301}}
+- Travel expense: POST /travelExpense {title,employee:{id}} → PUT convert → PUT travelDetails → POST costs (amountCurrencyIncVat, NOT amount)
+- Batch: POST /product/list, /department/list, /ledger/account/list for multiple items in one call
+- Correction voucher: reverse wrong postings with negated amounts + add correct postings""",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "API path, e.g. /customer or /order",
+                        "description": "API path, e.g. /customer or /ledger/voucher",
                     },
                     "body": {
                         "type": "string",
@@ -57,13 +78,21 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "tripletex_put",
-            "description": "PUT request to Tripletex API. For updates and action endpoints (/:invoice, /:payment, /:send, etc.). Action endpoints use query params.",
+            "description": """PUT request to Tripletex API. For updates and action endpoints.
+Action endpoints use QUERY PARAMS (not body):
+- PUT /order/{id}/:invoice?invoiceDate=DATE — create invoice from order
+- PUT /invoice/{id}/:payment?paymentDate=DATE&paymentTypeId=ID&paidAmount=AMOUNT — register payment (paidAmount incl VAT, negative for reversal)
+- PUT /invoice/{id}/:createCreditNote?date=DATE — create credit note
+- PUT /invoice/{id}/:send?sendType=EMAIL — send invoice
+- PUT /travelExpense/{id}/convert — convert to travel report (REQUIRED before per diem/travelDetails)
+- PUT /travelExpense/{id} — set travelDetails:{departureDate,returnDate,destination,isDayTrip:false,isForeignTravel:false,isCompensationFromRates:true}
+Foreign currency: after payment, book exchange rate difference as voucher. Agio(gain)→credit 8060, Disagio(loss)→debit 8160.""",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "API path, e.g. /order/123/:invoice or /employee/456",
+                        "description": "API path, e.g. /order/123/:invoice",
                     },
                     "body": {
                         "type": "string",
@@ -82,13 +111,13 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "tripletex_delete",
-            "description": "DELETE request to Tripletex API. Deletes a resource by ID.",
+            "description": "DELETE request. For travel expenses: DELETE /travelExpense/{id}. Posted vouchers CANNOT be deleted — use correction voucher instead.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "path": {
                         "type": "string",
-                        "description": "API path with ID, e.g. /travelExpense/123 or /ledger/voucher/456",
+                        "description": "API path with ID, e.g. /travelExpense/123",
                     },
                 },
                 "required": ["path"],
@@ -98,23 +127,59 @@ TOOLS = [
 ]
 
 
-def _truncate_response(data, max_chars=4000, max_items=10, path="") -> str:
+def _slim_account(acct: dict) -> dict:
+    """Keep only id, number, name from account objects."""
+    return {k: acct[k] for k in ("id", "number", "name") if k in acct}
+
+
+def _slim_values(values: list, path: str) -> list:
+    """Strip bulky fields from list responses based on endpoint."""
+    if "/ledger/account" in path:
+        return [_slim_account(v) for v in values]
+    if "/ledger/posting" in path:
+        return [
+            {k: (_slim_account(v[k]) if k == "account" and isinstance(v.get(k), dict) else v[k])
+             for k in ("id", "row", "account", "amountGross", "description") if k in v}
+            for v in values
+        ]
+    return values
+
+
+def _truncate_response(data, max_chars=6000, max_items=50, path="") -> str:
     """Truncate API response to fit in context."""
     if isinstance(data, dict):
-        # For list responses, smart truncation
-        values = data.get("values")
-        if isinstance(values, list):
-            # For vatType, show more items (important for sandbox compatibility)
-            if "vatType" in path:
-                # Show all standard VAT types (id < 100) for completeness
-                filtered = [v for v in values if v.get("id", 999) < 100]
-                data = dict(data)
-                data["values"] = filtered
-                data["_note"] = f"Showing {len(filtered)} standard VAT types (id < 100)"
-            elif len(values) > max_items:
-                data = dict(data)
-                data["values"] = values[:max_items]
-                data["_truncated"] = f"Showing {max_items} of {len(values)} items"
+        # Response is {"status": N, "data": {...}} — look for values inside "data"
+        inner = data.get("data", data)
+        if isinstance(inner, dict):
+            values = inner.get("values")
+            if isinstance(values, list):
+                inner = dict(inner)
+                if "vatType" in path:
+                    filtered = [v for v in values if v.get("id", 999) < 100]
+                    inner["values"] = filtered
+                    inner["_note"] = f"Showing {len(filtered)} standard VAT types (id < 100)"
+                else:
+                    inner["values"] = _slim_values(values, path)
+                    if len(inner["values"]) > max_items:
+                        inner["values"] = inner["values"][:max_items]
+                        inner["_truncated"] = f"Showing {max_items} of {len(values)} items"
+                # Update the outer dict
+                if "data" in data:
+                    data = dict(data)
+                    data["data"] = inner
+                else:
+                    data = inner
+
+            # Slim single-object "value" responses
+            value = inner.get("value")
+            if isinstance(value, dict) and "/ledger/account" in path:
+                inner = dict(inner)
+                inner["value"] = _slim_account(value)
+                if "data" in data:
+                    data = dict(data)
+                    data["data"] = inner
+                else:
+                    data = inner
 
     text = json.dumps(data, ensure_ascii=False, default=str)
     if len(text) > max_chars:
@@ -157,7 +222,9 @@ async def execute_tool(name: str, args_str: str, client) -> str:
         except json.JSONDecodeError as e:
             return f"Invalid JSON body: {e}"
 
-        payload = apply_fixes(path, "POST", payload)
+        # apply_fixes only works on dict payloads, not list (batch endpoints)
+        if isinstance(payload, dict):
+            payload = apply_fixes(path, "POST", payload)
 
         result = await client.call("POST", path, json_data=payload)
 
@@ -205,7 +272,7 @@ async def execute_tool(name: str, args_str: str, client) -> str:
             except json.JSONDecodeError:
                 payload = None
 
-        if payload:
+        if payload and isinstance(payload, dict):
             payload = apply_fixes(path, "PUT", payload)
 
         # Proactive bank account setup for action endpoints
@@ -255,6 +322,7 @@ async def run_agent(prompt: str, file_contents: list, tripletex_client, req_id: 
     start_time = time.time()
     max_iterations = 50
     time_budget = 270  # seconds (competition allows 300s, leave 30s margin)
+    get_cache = {}  # Cache duplicate GET requests
 
     for iteration in range(max_iterations):
         elapsed = time.time() - start_time
@@ -269,10 +337,11 @@ async def run_agent(prompt: str, file_contents: list, tripletex_client, req_id: 
                 tools=TOOLS,
                 tool_choice="auto",
                 temperature=0.1,
+                reasoning_effort="high",
             )
         except Exception as e:
             print(f"[{req_id}][AGENT] LLM call failed: {e}", file=sys.stderr)
-            # Retry once
+            # Retry once — try without reasoning_effort in case of compatibility issue
             try:
                 response = await openai_client.chat.completions.create(
                     model=model,
@@ -302,12 +371,35 @@ async def run_agent(prompt: str, file_contents: list, tripletex_client, req_id: 
             fn_args = tool_call.function.arguments
             print(f"[{req_id}][TOOL] {fn_name}: {fn_args[:200]}", file=sys.stderr)
 
-            result_str = await execute_tool(fn_name, fn_args, tripletex_client)
+            # Guardrail: cache duplicate GET requests
+            cache_key = f"{fn_name}:{fn_args}" if fn_name == "tripletex_get" else None
+            if cache_key and cache_key in get_cache:
+                result_str = get_cache[cache_key]
+                print(f"[{req_id}][CACHE] Hit for {fn_args[:100]}", file=sys.stderr)
+                tripletex_client.call_count -= 0  # don't count cached
+            else:
+                result_str = await execute_tool(fn_name, fn_args, tripletex_client)
+                if cache_key:
+                    get_cache[cache_key] = result_str
 
             messages.append({
                 "role": "tool",
                 "tool_call_id": tool_call.id,
                 "content": result_str,
+            })
+
+        # Guardrail: warn if too many GETs without writes
+        gets_since_write = 0
+        for m in reversed(messages):
+            if isinstance(m, dict) and m.get("role") == "tool":
+                gets_since_write += 1
+            elif hasattr(m, 'tool_calls') and m.tool_calls:
+                if any(tc.function.name in ("tripletex_post", "tripletex_put", "tripletex_delete") for tc in m.tool_calls):
+                    break
+        if gets_since_write > 8:
+            messages.append({
+                "role": "user",
+                "content": f"WARNING: You have made {gets_since_write} GET calls without any POST/PUT. You should have enough data. Create the required resources NOW.",
             })
 
     return {

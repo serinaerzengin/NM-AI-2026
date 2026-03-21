@@ -104,9 +104,9 @@
 5. **Salary dateOfBirth** — the `create_employment` helper doesn't ensure dateOfBirth is set on the employee first.
 6. **Efficiency across the board** — many "0 error" runs still have 2-3x optimal call count due to extra GET calls.
 
-### NEW BUG: apply_fixes.py crash
+### ~~NEW BUG: apply_fixes.py crash~~ → 🟢 FIXED
 **`371e12e4`**: `'list' object has no attribute 'setdefault'`
-This likely happens when the LLM sends a payload where a field that apply_fixes expects to be a dict is actually a list. Need to add type checking.
+**Fixed**: Added `isinstance(payload, dict)` check in agent.py before calling apply_fixes. List payloads (batch endpoints like POST /order/orderline/list) now pass through without crashing.
 
 ---
 

@@ -81,6 +81,8 @@ def apply_fixes(path: str, method: str, payload: dict) -> dict:
     if "/accountingDimensionValue" in path and method == "POST":
         if "name" in payload and "displayName" not in payload:
             payload["displayName"] = payload.pop("name")
+        # LLM sometimes sends accountingDimensionName instead of dimensionIndex
+        payload.pop("accountingDimensionName", None)
 
     return payload
 
@@ -105,6 +107,17 @@ async def ensure_bank_account(client):
 
 
 async def create_employment(client, employee_id: int):
+    # Ensure employee has dateOfBirth (required for employment)
+    try:
+        emp_result = await client.call("GET", f"/employee/{employee_id}")
+        emp_data = emp_result.get("data", {}).get("value", {})
+        if emp_data and not emp_data.get("dateOfBirth"):
+            emp_data["dateOfBirth"] = "1990-01-01"
+            await client.call("PUT", f"/employee/{employee_id}", json_data=emp_data)
+            print(f"[SETUP] Set dateOfBirth on employee {employee_id}", file=sys.stderr)
+    except Exception as e:
+        print(f"[SETUP] dateOfBirth check failed: {e}", file=sys.stderr)
+
     # First check if a division exists, create one if needed
     division_id = await _ensure_division(client)
 
