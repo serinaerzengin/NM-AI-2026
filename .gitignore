@@ -209,4 +209,39 @@ __marimo__/
 raw/
 processed/
 .DS_Store
+
+# Task 3 data — track raw data + product crops, ignore generated/processed
 task3-NorgesGruppen/data/*
+# Raw training data (images + annotations) — needed on IDUN
+!task3-NorgesGruppen/data/raw/
+# Splits
+!task3-NorgesGruppen/data/splits/
+task3-NorgesGruppen/data/splits/*
+!task3-NorgesGruppen/data/splits/.gitkeep
+# Processed product crops (small, needed for training)
+!task3-NorgesGruppen/data/processed/
+task3-NorgesGruppen/data/processed/*
+!task3-NorgesGruppen/data/processed/product_crops/
+!task3-NorgesGruppen/data/processed/product_crops_raw/
+task3-NorgesGruppen/data/processed/product_crops/*
+!task3-NorgesGruppen/data/processed/product_crops/.gitkeep
+!task3-NorgesGruppen/data/processed/product_crops/*.png
+!task3-NorgesGruppen/data/processed/product_crops/manifest.json
+task3-NorgesGruppen/data/processed/product_crops_raw/*
+!task3-NorgesGruppen/data/processed/product_crops_raw/.gitkeep
+!task3-NorgesGruppen/data/processed/product_crops_raw/*.jpg
+!task3-NorgesGruppen/data/processed/product_crops_raw/manifest.json
+
+# Task 3 results & logs — keep dirs, ignore outputs
+task3-NorgesGruppen/results/*
+!task3-NorgesGruppen/results/.gitkeep
+task3-NorgesGruppen/logs/*
+!task3-NorgesGruppen/logs/.gitkeep
+
+# Optuna DBs and training runs
+*.db
+*.db-journal
+
+# Agent logs (keep directory, ignore contents)
+task1-Tripletex/logs/*
+!task1-Tripletex/logs/.gitkeep
