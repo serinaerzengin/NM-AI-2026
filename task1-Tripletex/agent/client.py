@@ -92,15 +92,27 @@ class TripletexClient:
             idx += 1
         actual = f"{alias}_{idx}"
 
+        # Also register under normalized alias (strip _create, _post, _get suffixes)
+        # so both $customer_create_id and $customer_id resolve
+        short = alias
+        for suffix in ("_create", "_post", "_search", "_get"):
+            if short.endswith(suffix):
+                short = short[:-len(suffix)]
+                break
+
         for key, value in response_data.items():
             if isinstance(value, (str, int, float, bool)) or value is None:
                 self.state[f"{actual}_{key}"] = value
                 if idx == 0:
                     self.state[f"{alias}_{key}"] = value
+                    if short != alias:
+                        self.state[f"{short}_{key}"] = value
             elif isinstance(value, dict) and "id" in value:
                 self.state[f"{actual}_{key}_id"] = value["id"]
                 if idx == 0:
                     self.state[f"{alias}_{key}_id"] = value["id"]
+                    if short != alias:
+                        self.state[f"{short}_{key}_id"] = value["id"]
 
     def resolve(self, payload):
         """Replace $placeholder strings with state values, preserving types."""

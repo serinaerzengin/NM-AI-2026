@@ -579,6 +579,27 @@ async def _execute(client: TripletexClient, steps: list[dict],
                     logger.info(f"Step {i}: entity already exists, stored from GET")
                     continue
 
+        # Handle bank account error on POST /invoice → try PUT /order/:invoice fallback
+        if api_result["status"] == 422 and method == "POST" and path.rstrip("/") == "/invoice":
+            error_str = str(api_result["data"]).lower()
+            if "bankkontonummer" in error_str or "bank account" in error_str:
+                # Try to find the order ID from the payload and use /:invoice action
+                order_id = None
+                if payload and isinstance(payload, dict):
+                    orders = payload.get("orders", [])
+                    if orders and isinstance(orders, list) and isinstance(orders[0], dict):
+                        order_id = orders[0].get("id")
+                if order_id:
+                    fallback_path = f"/order/{order_id}/:invoice"
+                    fallback_params = {"invoiceDate": payload.get("invoiceDate", TODAY)}
+                    logger.info(f"Step {i}: bank account error, trying PUT {fallback_path}")
+                    fallback_result = await client.call("PUT", fallback_path, params=fallback_params)
+                    if fallback_result["status"] < 400:
+                        _store_response(client, alias, fallback_result["data"])
+                        logger.info(f"Step {i} fallback OK: {fallback_result['status']}")
+                        continue
+                    logger.warning(f"Step {i} fallback also failed: {fallback_result['status']}")
+
         if _is_unrecoverable(api_result["data"]):
             logger.warning(f"Step {i}: unrecoverable error")
             failed.add(alias)

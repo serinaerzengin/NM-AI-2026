@@ -120,19 +120,22 @@ The decomposer and executor read this to avoid common mistakes.
 
 ## Invoice Creation (Outgoing)
 
-**Endpoint:** `POST /invoice`
+**TWO methods to create invoices (try BOTH if one fails):**
 
-**CRITICAL PREREQUISITE:** Invoices require the company to have a bank account number registered.
-If `POST /invoice` returns "Faktura kan ikke opprettes før selskapet har registrert et bankkontonummer":
-- This is a Tripletex company configuration issue, NOT something the agent can fix via API.
-- Do NOT try to register a bank account via API — `PUT /company` is blocked by the proxy.
-- Do NOT waste turns trying workarounds. Just proceed with creating the order (it will still be scored for the order/product/customer creation).
+**Method A (preferred): Convert order to invoice**
+`PUT /order/{order_id}/:invoice` with query params `invoiceDate=<today>` — NO request body.
+This converts an existing order directly into an invoice.
+
+**Method B (alternative): Create standalone invoice**
+`POST /invoice` with `invoiceDate`, `invoiceDueDate`, `customer: {"id": <id>}`, `orders: [{"id": <order_id>}]`
+
+**IMPORTANT:** If you get "Faktura kan ikke opprettes før selskapet har registrert et bankkontonummer", try the OTHER method. If both fail, proceed — the order/products are still scored.
 
 **This is a multi-step workflow:**
 1. Customer must exist → `GET /customer` by name or org number. If not found, `POST /customer` with `name`, `isCustomer: true`, and `organizationNumber` if given.
-2. Product(s) must exist → For each product: `GET /product` by name. If not found, `POST /product` with `name`, `number` (product number), `priceExcludingVatCurrency`, `vatType: {"id": <vat_id>}`.
+2. Product(s) must exist → For each product: `GET /product` by number. If not found, `POST /product` with `name`, `number` (product number), `priceExcludingVatCurrency`, `vatType: {"id": <vat_id>}`.
 3. Create order → `POST /order` with `customer: {"id": <id>}`, `orderDate` (today), `deliveryDate` (today), and `orderLines` array.
-4. Create invoice → `POST /invoice` with `invoiceDate`, `invoiceDueDate`, `customer: {"id": <id>}`, `orders: [{"id": <order_id>}]`
+4. Create invoice → `PUT /order/$order_id/:invoice` with params `invoiceDate=<today>` (NO body)
 
 **Order lines** (inside `POST /order` → `orderLines` array):
 Each line needs: `product: {"id": <id>}`, `count: 1`, `unitPriceExcludingVatCurrency: <amount>`, `vatType: {"id": <vat_id>}`
@@ -440,12 +443,12 @@ Register hours for an employee on a project activity, then generate a project in
    - `employee: {"id": <employee_id>}`
    - `date`: today
    - `hours: <number_of_hours>`
-10. `POST /order` — create order from project:
+10. Create a product for the billing line if needed → `POST /product`
+11. `POST /order` — create order from project:
     - `customer: {"id": <customer_id>}`
     - `orderDate`: today, `deliveryDate`: today
     - `orderLines: [{"product": {"id": ...}, "count": <hours>, "unitPriceExcludingVatCurrency": <rate>}]`
-    NOTE: May need to create a product for the billing line item. Use `POST /order` with inline `orderLines`, NOT the BETA `POST /project/orderline` (returns 403).
-11. `POST /invoice` — create invoice from order
+12. `PUT /order/$order_id/:invoice` with params `invoiceDate=<today>` (NO body) — converts order to invoice
 
 ---
 
@@ -457,7 +460,7 @@ Set a fixed price on a project and invoice a percentage as a milestone payment.
 1. `GET /customer` → find/create customer
 2. `GET /employee` → find/create employee
 3. `POST /project` with:
-   - `name`, `number`: "1", `startDate`: today
+   - `name`, `number`: random 5-digit string (NOT "1"), `startDate`: today
    - `projectManager: {"id": <emp_id>}`
    - `customer: {"id": <cust_id>}`
    - `isFixedPrice: true`
@@ -467,8 +470,8 @@ Set a fixed price on a project and invoice a percentage as a milestone payment.
    - `customer: {"id": <cust_id>}`
    - `orderDate`: today, `deliveryDate`: today
    - `orderLines: [{"description": "Milestone payment X%", "count": 1, "unitPriceExcludingVatCurrency": <milestone_amount>}]`
-   NOTE: For order lines without a product, check if a description-only line works. If not, create a generic product first. Use `POST /order` with inline `orderLines`, NOT the BETA `POST /project/orderline` (returns 403).
-6. `POST /invoice` from order
+   NOTE: For order lines without a product, create a generic product first (e.g. "Milestone payment"). Use `POST /order` with inline `orderLines`, NOT the BETA `POST /project/orderline` (returns 403).
+6. `PUT /order/$order_id/:invoice` with params `invoiceDate=<today>` (NO body) — converts order to invoice
 
 ---
 
