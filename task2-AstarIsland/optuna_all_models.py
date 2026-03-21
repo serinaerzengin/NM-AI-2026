@@ -33,8 +33,8 @@ from astar.empirical_bins import (
 import store
 
 DATA_DIR = Path(__file__).parent / "data" / "rounds"
-TRAIN_ROUNDS = list(range(1, 6))
-VAL_ROUNDS = [6, 7, 8]
+TRAIN_ROUNDS = list(range(1, 11))  # Rounds 1-10 (50 maps)
+VAL_ROUNDS = [11, 12, 13]  # Most recent rounds with observations
 SEEDS = list(range(5))
 PROB_FLOOR = 0.001
 

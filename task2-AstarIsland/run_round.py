@@ -1,6 +1,7 @@
 """Live round orchestrator for Astar Island.
 
 Uses CatBoost as primary model + empirical bins for round-specific calibration.
+Adaptive stat blending: trusts observations less for high-activity rounds.
 
 Usage:
     python run_round.py              # Auto-detect active round
@@ -33,9 +34,20 @@ from astar.types import Prediction
 
 DATA_DIR = Path(__file__).parent / "data" / "rounds"
 BEST_PARAMS_ALL_PATH = Path(__file__).parent / "best_params_all.json"
-BEST_PARAMS_PATH = Path(__file__).parent / "best_params.json"
+ADAPTIVE_PARAMS_PATH = Path(__file__).parent / "experiments" / "adaptive_stats_kfold_params.json"
 SEEDS = list(range(5))
 RATE_LIMIT_DELAY = 0.25
+
+# Default adaptive params (from k-fold Optuna)
+DEFAULT_ADAPTIVE = {"a": -15.28, "b": 0.58, "c": 4.41}
+DEFAULT_K_PARAMS = {
+    "k_base": 49, "k_low_thresh": 0.041, "k_low": 72,
+    "k_mid_thresh": 0.149, "k_mid": 156,
+}
+
+
+def sigmoid(x):
+    return 1.0 / (1.0 + np.exp(-np.clip(x, -20, 20)))
 
 
 def get_training_rounds() -> list[int]:
@@ -59,12 +71,42 @@ def load_catboost_params() -> dict:
     return {"iterations": 200, "depth": 5, "learning_rate": 0.1, "l2_leaf_reg": 6.0, "subsample": 0.8}
 
 
-def load_xgb_k_param() -> float:
-    """Load k from XGBoost best_params.json (used for empirical bin blending)."""
-    if BEST_PARAMS_PATH.exists():
-        with open(BEST_PARAMS_PATH) as f:
-            return json.load(f).get("k", 150)
-    return 150
+def load_adaptive_params() -> tuple[dict, dict]:
+    """Load adaptive stat blending and k params."""
+    if ADAPTIVE_PARAMS_PATH.exists():
+        with open(ADAPTIVE_PARAMS_PATH) as f:
+            data = json.load(f)
+        return data.get("adaptive_stats", DEFAULT_ADAPTIVE), data.get("k_params", DEFAULT_K_PARAMS)
+    return DEFAULT_ADAPTIVE, DEFAULT_K_PARAMS
+
+
+def compute_historical_avg_stats(training_rounds: list[int]) -> RoundStats:
+    """Compute average round stats across all training rounds."""
+    all_stats = []
+    for rn in training_rounds:
+        for si in SEEDS:
+            sd = DATA_DIR / f"round_{rn}" / f"seed_{si}"
+            with open(sd / "initial_state.json") as f:
+                raw = json.load(f)
+            with open(sd / "ground_truth.json") as f:
+                gt_raw = json.load(f)
+            state = MapState(grid=np.array(raw["grid"]), settlements=raw["settlements"])
+            gt = np.array(gt_raw["ground_truth"])
+            all_stats.append(compute_round_stats_from_ground_truth(gt, state))
+
+    fields = ["ruin_rate", "settlement_rate", "port_rate", "expansion_distance",
+              "forest_rate", "empty_rate", "settlement_to_ruin_ratio"]
+    return RoundStats(**{f: np.mean([getattr(s, f) for s in all_stats]) for f in fields})
+
+
+def blend_stats(obs_stats: RoundStats, hist_stats: RoundStats, obs_weight: float) -> RoundStats:
+    """Blend observation stats and historical stats."""
+    fields = ["ruin_rate", "settlement_rate", "port_rate", "expansion_distance",
+              "forest_rate", "empty_rate", "settlement_to_ruin_ratio"]
+    return RoundStats(**{
+        f: obs_weight * getattr(obs_stats, f) + (1 - obs_weight) * getattr(hist_stats, f)
+        for f in fields
+    })
 
 
 def load_training_data(training_rounds: list[int]):
@@ -252,8 +294,21 @@ def main():
     print(f"  Budget: {queries_used}/{queries_max} used, {remaining} remaining")
 
     if remaining <= 0:
-        print("  No queries remaining — using model predictions only")
+        print("  No queries remaining — loading stored observations")
         all_observations = [[] for _ in states]
+        for si in range(len(states)):
+            for raw in store.list_observations(round_number, si):
+                if isinstance(raw, list):
+                    raw = raw[0]
+                vp = raw["viewport"]
+                all_observations[si].append(Observation(
+                    grid=np.array(raw["grid"]),
+                    settlements=raw.get("settlements", []),
+                    viewport=(vp["x"], vp["y"], vp["w"], vp["h"]),
+                    seed_index=si,
+                ))
+        stored_count = sum(len(obs) for obs in all_observations)
+        print(f"  Loaded {stored_count} stored observations")
     else:
         all_observations = execute_queries(round_id, states, round_number)
 
@@ -261,54 +316,57 @@ def main():
     for obs_list in all_observations:
         all_obs_flat.extend(obs_list)
 
-    # Step 4: Build empirical bins + predict
+    # Step 4: Adaptive stat blending + empirical bins + predict
     print("\n[4/5] Generating predictions...")
 
+    # Load adaptive params
+    adapt_params, k_params = load_adaptive_params()
+    hist_stats = compute_historical_avg_stats(training_rounds)
+
     if all_obs_flat:
-        combined_round_stats = compute_round_stats_from_observations(all_obs_flat, states[0])
+        obs_stats = compute_round_stats_from_observations(all_obs_flat, states[0])
         bin_dists = build_empirical_distributions(all_obs_flat, states)
         bin_counts = get_bin_coverage_stats(all_obs_flat, states)
-        print(f"  Empirical bins: {len(bin_dists)} bins with data")
-        print(f"  Round stats: settle={combined_round_stats.settlement_rate:.3f}, "
-              f"ruin={combined_round_stats.ruin_rate:.3f}")
-    else:
-        # Fallback: average historical stats
-        all_stats = []
-        for rn in training_rounds:
-            for si in SEEDS:
-                sd = DATA_DIR / f"round_{rn}" / f"seed_{si}"
-                with open(sd / "initial_state.json") as f: raw = json.load(f)
-                with open(sd / "ground_truth.json") as f: gt_raw = json.load(f)
-                state_t = MapState(grid=np.array(raw["grid"]), settlements=raw["settlements"])
-                gt_t = np.array(gt_raw["ground_truth"])
-                all_stats.append(compute_round_stats_from_ground_truth(gt_t, state_t))
-        combined_round_stats = RoundStats(
-            ruin_rate=np.mean([s.ruin_rate for s in all_stats]),
-            settlement_rate=np.mean([s.settlement_rate for s in all_stats]),
-            port_rate=np.mean([s.port_rate for s in all_stats]),
-            expansion_distance=np.mean([s.expansion_distance for s in all_stats]),
-            forest_rate=np.mean([s.forest_rate for s in all_stats]),
-            empty_rate=np.mean([s.empty_rate for s in all_stats]),
-            settlement_to_ruin_ratio=np.mean([s.settlement_to_ruin_ratio for s in all_stats]),
+
+        # Adaptive blending: trust observations less for high-activity rounds
+        obs_settle = obs_stats.settlement_rate
+        hist_settle = hist_stats.settlement_rate
+        divergence = abs(obs_settle - hist_settle) / (hist_settle + 1e-6)
+        obs_weight = sigmoid(
+            adapt_params["a"] * obs_settle +
+            adapt_params["b"] * divergence +
+            adapt_params["c"]
         )
+
+        blended_stats = blend_stats(obs_stats, hist_stats, obs_weight)
+
+        print(f"  Empirical bins: {len(bin_dists)} bins with data")
+        print(f"  OBS stats:  settle={obs_stats.settlement_rate:.3f}, ruin={obs_stats.ruin_rate:.3f}")
+        print(f"  HIST stats: settle={hist_stats.settlement_rate:.3f}, ruin={hist_stats.ruin_rate:.3f}")
+        print(f"  Blended:    settle={blended_stats.settlement_rate:.3f} (obs_weight={obs_weight:.3f})")
+    else:
+        blended_stats = hist_stats
         bin_dists = {}
         bin_counts = {}
+        print(f"  No observations — using historical avg stats")
+        print(f"  HIST stats: settle={hist_stats.settlement_rate:.3f}, ruin={hist_stats.ruin_rate:.3f}")
+
+    # Adaptive k based on blended settlement rate
+    settle = blended_stats.settlement_rate
+    if settle < k_params["k_low_thresh"]:
+        k = k_params["k_low"]
+    elif settle < k_params["k_mid_thresh"]:
+        k = k_params["k_mid"]
+    else:
+        k = k_params["k_base"]
 
     # Predict and submit each seed
     for si, state in enumerate(states):
-        base_pred = predict_map(models, state, combined_round_stats)
+        base_pred = predict_map(models, state, blended_stats)
 
         if bin_dists:
-            settle_rate = combined_round_stats.settlement_rate
-            base_k = load_xgb_k_param()
-            if settle_rate < 0.05:
-                k = 50
-            elif settle_rate < 0.10:
-                k = min(base_k, 100)
-            else:
-                k = base_k
             if si == 0:
-                print(f"    k={k:.0f} (settle_rate={settle_rate:.3f})")
+                print(f"    k={k:.0f} (settle_rate={settle:.3f})")
             final_pred = predict_with_empirical_bins(
                 state, bin_dists, base_pred, bin_counts=bin_counts, k=k
             )

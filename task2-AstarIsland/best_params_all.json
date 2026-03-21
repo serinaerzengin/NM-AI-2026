@@ -10,11 +10,11 @@
     "min_child_weight": 18
   },
   "catboost": {
-    "iterations": 108,
-    "depth": 5,
-    "learning_rate": 0.25241544804814964,
-    "l2_leaf_reg": 5.68363583520721,
-    "subsample": 0.8009331909849011
+    "iterations": 195,
+    "depth": 6,
+    "learning_rate": 0.02497151496678088,
+    "l2_leaf_reg": 2.794626398094844,
+    "subsample": 0.7748041090133269
   },
   "lightgbm": {
     "n_estimators": 334,
