@@ -7,9 +7,9 @@ RUN pip install --no-cache-dir \
     "uvicorn[standard]" \
     httpx \
     python-dotenv \
-    openai
+    openai \
+    openpyxl
 
-COPY api.py agent.py llm.py tripletex_client.py context.py validator.py file_handler.py ./
-COPY specs/ specs/
+COPY \ TODO FILL INN HERE
 
 CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8080"]

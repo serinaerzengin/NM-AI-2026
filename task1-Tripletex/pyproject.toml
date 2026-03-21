@@ -9,4 +9,5 @@ dependencies = [
     "httpx",
     "python-dotenv",
     "openai",
+    "openpyxl",
 ]
