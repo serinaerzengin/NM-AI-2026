@@ -92,12 +92,16 @@ class TripletexClient:
             idx += 1
         actual = f"{alias}_{idx}"
 
-        # Also register under normalized alias (strip _create, _post, _get suffixes)
-        # so both $customer_create_id and $customer_id resolve
+        # Also register under normalized alias so $customer_id resolves
+        # regardless of whether the plan used customer_create, create_customer, post_customer, etc.
         short = alias
         for suffix in ("_create", "_post", "_search", "_get"):
             if short.endswith(suffix):
                 short = short[:-len(suffix)]
+                break
+        for prefix in ("create_", "post_", "get_", "search_"):
+            if short.startswith(prefix):
+                short = short[len(prefix):]
                 break
 
         for key, value in response_data.items():
@@ -118,15 +122,20 @@ class TripletexClient:
     def _normalize_key(key: str) -> str:
         """Normalize LLM-generated placeholder keys.
 
-        The LLM often generates keys like 'get_customer_values_0_id' or
-        'post_employee_value_id' referencing raw API response structure.
-        Our state stores flat keys like 'get_customer_0_id'. Normalize to match.
+        The LLM generates various patterns:
+        - 'get_customer_values_0_id' → 'customer_0_id'
+        - 'post_employee_value_id' → 'employee_id'
+        - 'create_order_id' → 'order_id'
         """
         import re
-        # Remove _value_ (single entity response) → e.g. post_employee_value_id → post_employee_id
+        # Remove _value_ (single entity response)
         key = re.sub(r'_value_', '_', key)
-        # Remove _values_N_ (list response) → e.g. get_customer_values_0_id → get_customer_0_id
+        # Remove _values_N_ (list response)
         key = re.sub(r'_values_(\d+)_', r'_\1_', key)
+        # Strip verb prefixes: get_, post_, create_, search_, put_
+        key = re.sub(r'^(get|post|create|search|put)_', '', key)
+        # Strip verb suffixes: _create, _post, _get, _search
+        key = re.sub(r'_(create|post|get|search)$', '', key)
         return key
 
     def resolve(self, payload):
