@@ -28,7 +28,7 @@ CUTOUT_CACHE = ROOT / "data" / "product_cutouts"
 EMPTY_SHELVES_DIR = ROOT / "data" / "empty_shelves"
 
 NUM_VARIANTS = 3             # synthetic variants per real image
-ROTATION_RANGE = 3           # ±3 degrees
+ROTATION_RANGE = 5           # ±5 degrees
 BRIGHTNESS_RANGE = 0.10      # ±10% brightness
 BLUR_SIGMA = (0.3, 0.8)      # Gaussian blur range for pasted products
 FLIP_PROB = 0.5               # probability of horizontal flip per product
@@ -640,16 +640,19 @@ def main():
     print("=" * 60)
 
     # Phase 1: Load data
-    print("\n[Phase 1] Loading data and building category mapping...")
+    print("\n[Phase 1] Loading data and loading pre-built cutouts...")
     coco, meta = load_data()
-    cat_to_images = build_category_mapping(coco, meta)
 
-    # Phase 2: Prepare cutouts
-    print("\n[Phase 2] Preparing product cutouts (background removal)...")
-    cat_to_cutouts = prepare_cutouts(cat_to_images)
+    # Load cutouts directly from cache (pre-built)
+    cat_to_cutouts = {}
+    for p in sorted(CUTOUT_CACHE.iterdir()):
+        if p.suffix == ".png":
+            cat_id = int(p.stem.split("_")[0].replace("cat", ""))
+            cat_to_cutouts.setdefault(cat_id, []).append(p)
+    print(f"  Loaded cutouts for {len(cat_to_cutouts)} categories")
 
-    # Phase 3: Compute sampling weights
-    print("\n[Phase 3] Computing sampling weights...")
+    # Phase 2: Compute sampling weights
+    print("\n[Phase 2] Computing sampling weights...")
     sampling_weights = compute_sampling_weights(coco, cat_to_cutouts)
 
     cat_id_to_name = {c["id"]: c["name"] for c in coco["categories"]}
