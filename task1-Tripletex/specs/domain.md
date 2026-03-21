@@ -2,6 +2,7 @@
 
 ### Invoice & Orders
 - To create an invoice: first POST /order (with orderLines), then PUT /order/{id}/:invoice
+- PUT /order/{id}/:invoice is a query-param-only endpoint: use params (invoiceDate required), NO request body
 - To register payment: GET /invoice/paymentType first, then PUT /invoice/{id}/:payment with params paymentDate, paymentTypeId, paidAmount
 - To credit/reverse: PUT /invoice/{id}/:createCreditNote with params (date is auto-set)
 - Order needs: customer (object with id), orderDate, orderLines array
@@ -28,8 +29,10 @@
 
 ### Salary / Payroll
 - POST /salary/transaction: date, year, month, payslips array
-- Each payslip: employee (object with id), date, year, month, specifications (salaryType (object with id), count, rate)
-- GET /salary/type first for valid types ("Fastlønn", "Bonus", "Feriepenger")
+- IMPORTANT: date, year, month must be set at BOTH the transaction level AND inside each payslip
+- Each payslip: employee (object with id), date, year, month, specifications array
+- Each specification: salaryType (object with id), count, rate
+- GET /salary/type first for valid types (search by name e.g. "Fastlønn", "Bonus", "Feriepenger")
 - Employee MUST have active employment in the period
 
 ### Project
@@ -46,11 +49,15 @@
 - Link to voucher posting via freeAccountingDimension1/2/3 (object with id)
 
 ### Travel Expense
-- POST /travelExpense: employee (object with id), title
-- costs array: costCategory (object with id), paymentType (object with id), amountCurrencyIncVat, date
+- POST /travelExpense: employee (object with id), title, costs array (inline)
+- Each cost: costCategory (object with id), paymentType (object with id), amountCurrencyIncVat, date
+- To find valid categories: GET /travelExpense/costCategory
+- To find valid payment types: GET /travelExpense/paymentType
+- Alternatively, costs can be added separately via POST /travelExpense/cost with travelExpense ref
 
 ### General
 - Dates: "YYYY-MM-DD" format
 - References: use object with id, e.g. {"id": 42}
 - Lookup by org number: GET /customer?organizationNumber=xxx or GET /supplier?organizationNumber=xxx
 - Existing entities: use GET to find them. Only POST to create NEW ones.
+- Action endpoints (/:invoice, /:payment, /:createCreditNote) use query params, NOT request body
