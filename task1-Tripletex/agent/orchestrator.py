@@ -324,10 +324,17 @@ def _sanitize_step(path: str, method: str, payload: dict | None,
         if "active" not in payload:
             payload["active"] = True
 
-    # ── Order: ensure deliveryDate ──
+    # ── Order: ensure deliveryDate, strip vatType from order lines ──
     elif path.rstrip("/") == "/order" and method == "POST" and payload and isinstance(payload, dict):
         if "deliveryDate" not in payload:
             payload["deliveryDate"] = payload.get("orderDate", TODAY)
+        # Strip vatType from order lines — products inherit their own vatType
+        # Setting it on lines causes "Ugyldig mva-kode" and bank account errors
+        order_lines = payload.get("orderLines")
+        if order_lines and isinstance(order_lines, list):
+            for line in order_lines:
+                if isinstance(line, dict):
+                    line.pop("vatType", None)
         if "orderDate" not in payload:
             payload["orderDate"] = TODAY
 
@@ -585,6 +592,41 @@ async def _execute(client: TripletexClient, steps: list[dict],
                     _store_response(client, alias, existing)
                     logger.info(f"Step {i}: entity already exists, stored from GET")
                     continue
+
+        # Handle salary "no employment" → fallback to manual voucher on 5000-series
+        if api_result["status"] == 422 and "/salary/transaction" in path:
+            error_str = str(api_result["data"]).lower()
+            if "arbeidsforhold" in error_str:
+                logger.info(f"Step {i}: salary API failed (no employment), trying voucher fallback")
+                total = 0
+                if payload and isinstance(payload, dict):
+                    for ps in payload.get("payslips", []):
+                        for spec in ps.get("specifications", []):
+                            total += spec.get("rate", 0) * spec.get("count", 1)
+                if total > 0:
+                    # Get accounts and voucherType for manual salary voucher
+                    acct_5000 = await client.call("GET", "/ledger/account", params={"number": 5000, "count": 1})
+                    acct_1920 = await client.call("GET", "/ledger/account", params={"number": 1920, "count": 1})
+                    vt = await client.call("GET", "/ledger/voucherType", params={"count": 1})
+                    a5 = acct_5000.get("data", {}).get("values", [{}])[0].get("id") if acct_5000["status"] < 400 else None
+                    a1 = acct_1920.get("data", {}).get("values", [{}])[0].get("id") if acct_1920["status"] < 400 else None
+                    vt_id = vt.get("data", {}).get("values", [{}])[0].get("id") if vt["status"] < 400 else None
+                    if a5 and a1 and vt_id:
+                        voucher_payload = {
+                            "date": TODAY,
+                            "description": f"Lønn (manuelt bilag)",
+                            "voucherType": {"id": vt_id},
+                            "postings": [
+                                {"account": {"id": a5}, "amount": total, "row": 1},
+                                {"account": {"id": a1}, "amount": -total, "row": 2},
+                            ]
+                        }
+                        vresult = await client.call("POST", "/ledger/voucher", json=voucher_payload)
+                        if vresult["status"] < 400:
+                            _store_response(client, alias, vresult["data"])
+                            logger.info(f"Step {i}: salary voucher fallback OK: {vresult['status']}")
+                            continue
+                        logger.warning(f"Step {i}: salary voucher fallback also failed: {vresult['status']}")
 
         # Handle bank account error on POST /invoice → try PUT /order/:invoice fallback
         if api_result["status"] == 422 and method == "POST" and path.rstrip("/") == "/invoice":

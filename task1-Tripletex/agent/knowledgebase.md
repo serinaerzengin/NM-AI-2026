@@ -138,9 +138,10 @@ This converts an existing order directly into an invoice.
 4. Create invoice → `PUT /order/$order_id/:invoice` with params `invoiceDate=<today>` (NO body)
 
 **Order lines** (inside `POST /order` → `orderLines` array):
-Each line needs: `product: {"id": <id>}`, `count: 1`, `unitPriceExcludingVatCurrency: <amount>`, `vatType: {"id": <vat_id>}`
+Each line needs: `product: {"id": <id>}`, `count: 1`, `unitPriceExcludingVatCurrency: <amount>`
+**CRITICAL: Do NOT set vatType on order lines.** The product already has the correct vatType from when it was created. Setting vatType on order lines causes "Ugyldig mva-kode" errors and bank account errors.
 
-**Multiple products with different VAT rates:** Create each product with its own `vatType`, then add each as a separate order line.
+**Multiple products with different VAT rates:** Create each product with its own `vatType` (set during product creation), then add each as a separate order line WITHOUT vatType.
 
 **"Send" the invoice:** After creating, some tasks ask to "send" it. Use `PUT /invoice/{id}/:send` with `sendType` query param (e.g. "EMAIL").
 
