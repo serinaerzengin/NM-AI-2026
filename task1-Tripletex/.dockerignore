@@ -6,4 +6,6 @@ __pycache__
 .DS_Store
 uv.lock
 docs/
-specs/
+specs/openapi.json
+specs/build_registry.py
+test_agent.py
