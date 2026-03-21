@@ -12,14 +12,16 @@ echo "Region: europe-north1"
 # Authenticate if needed
 gcloud config set project "$PROJECT"
 
-# Deploy with OPENAI_API_KEY as env var
+# Deploy with API keys as env vars
 gcloud run deploy tripletex-agent \
   --source . \
   --region europe-north1 \
   --allow-unauthenticated \
-  --memory 1Gi \
+  --memory 2Gi \
   --timeout 300 \
-  --set-env-vars "OPENAI_API_KEY=$OPENAI_API_KEY"
+  --concurrency 10 \
+  --max-instances 5 \
+  --set-env-vars "GEMINI_API_KEY=$GEMINI_API_KEY,OPENAI_API_KEY=$OPENAI_API_KEY"
 
 echo ""
 echo "Done! Submit your URL at https://app.ainm.no/submit/tripletex"

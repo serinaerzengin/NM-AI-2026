@@ -2,13 +2,21 @@ FROM python:3.13-slim
 
 WORKDIR /app
 
-RUN pip install --no-cache-dir \
-    fastapi \
-    "uvicorn[standard]" \
-    httpx \
-    python-dotenv
+# Install uv for fast dependency resolution
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
 
-# TODO: COPY agent code once built
+# Copy dependency files first (cache layer)
+COPY pyproject.toml uv.lock ./
+
+# Install dependencies
+RUN uv sync --frozen --no-dev
+
+# Copy application code
 COPY api.py .
+COPY agent/ agent/
+COPY specs/ specs/
 
-CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8080"]
+# Create logs directory
+RUN mkdir -p logs
+
+CMD ["uv", "run", "uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8080"]

@@ -4,6 +4,8 @@
 __pycache__
 *.pyc
 .DS_Store
-uv.lock
 docs/
-specs/
+logs/
+eval_local.py
+agent/research.md
+agent/plan.md

@@ -8,4 +8,6 @@ dependencies = [
     "uvicorn[standard]",
     "httpx",
     "python-dotenv",
+    "openai-agents>=0.12.0",
+    "litellm>=1.80.0",
 ]

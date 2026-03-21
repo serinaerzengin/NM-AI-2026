@@ -18,6 +18,8 @@ from __future__ import annotations
 import json
 import logging
 import time
+from datetime import date
+from pathlib import Path
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -235,6 +237,13 @@ def _log_call(
             method, endpoint, status,
             json.dumps(resp_body, ensure_ascii=False, default=str)[:300],
         )
+        # Detect expired proxy token — tell executor to stop immediately
+        error_str = json.dumps(resp_body, ensure_ascii=False, default=str)
+        if status == 403 and "expired" in error_str.lower():
+            return (
+                "FATAL: Proxy token has expired. This submission's time is up. "
+                "Say DONE immediately — no more API calls will work."
+            )
         return json.dumps({"status": status, "error": resp_body}, ensure_ascii=False, default=str)
     else:
         logger.info("API_OK | %s %s | %d", method, endpoint, status)
@@ -263,6 +272,72 @@ def _trim_entity(entity: Any) -> Any:
     return {k: v for k, v in entity.items() if k in keep}
 
 
+# ── Schema rendering ─────────────────────────────────────────────────────────
+
+
+def _render_props(
+    lines: list[str],
+    props: dict,
+    required_fields: set,
+    essential_refs: set,
+    indent: int = 4,
+    max_depth: int = 3,
+) -> None:
+    """Render schema properties into prompt lines, including nested arrays."""
+    if max_depth <= 0:
+        return
+    pad = " " * indent
+    for fname, fschema in props.items():
+        ftype = fschema.get("type", "?")
+        ref = fschema.get("_ref", "")
+        enum = fschema.get("enum", [])
+        desc = fschema.get("description", "")
+        is_required = fname in required_fields
+
+        # Skip _ref fields that are clearly never needed for basic tasks
+        ALWAYS_SKIP = {
+            "attestation", "approvedBy", "completedBy", "rejectedBy",
+            "reverseVoucher", "payslip", "voucher", "invoice",
+            "closeGroup", "amortizationAccount", "asset",
+            "internationalId", "holidayAllowanceEarned",
+        }
+        if ref and fname in ALWAYS_SKIP:
+            continue
+
+        parts = [f"{pad}- {fname}: {ftype}"]
+        if is_required:
+            parts.append("REQUIRED")
+        if ref:
+            parts.append(f'(linked → send {{"id": <int>}})')
+        if enum:
+            parts.append(f"(enum: {enum})")
+        if desc:
+            parts.append(f"— {desc[:80]}")
+        lines.append(" ".join(parts))
+
+        # Recurse into array items
+        if ftype == "array" and "items" in fschema:
+            items = fschema["items"]
+            item_props = items.get("properties", {})
+            item_required = set(items.get("required", []))
+            if item_props:
+                lines.append(f"{pad}  Each item has:")
+                _render_props(
+                    lines, item_props, item_required, essential_refs,
+                    indent=indent + 4, max_depth=max_depth - 1,
+                )
+
+        # Recurse into nested objects (non-ref)
+        if ftype == "object" and not ref and "properties" in fschema:
+            nested_props = fschema["properties"]
+            nested_required = set(fschema.get("required", []))
+            if nested_props:
+                _render_props(
+                    lines, nested_props, nested_required, essential_refs,
+                    indent=indent + 4, max_depth=max_depth - 1,
+                )
+
+
 # ── Build the executor prompt from the plan ─────────────────────────────────
 
 
@@ -278,7 +353,14 @@ def _build_executor_prompt(plan_steps: list, files: list | None = None) -> str:
     - The original user prompt
     - index.md or full registry.json
     """
+    # Load knowledge base for the executor
+    kb_path = Path(__file__).parent / "knowledgebase.md"
+    knowledge_base = kb_path.read_text() if kb_path.exists() else ""
+
     lines = [
+        f"TODAY'S DATE: {date.today().isoformat()}",
+        f"Use this date for all date fields (orderDate, invoiceDate, startDate, paymentDate, voucher date, etc.) unless the task specifies a different date.",
+        "",
         "Execute the following plan step by step. Each step is one API call.",
         "",
         "IMPORTANT RULES:",
@@ -295,8 +377,17 @@ def _build_executor_prompt(plan_steps: list, files: list | None = None) -> str:
         "- If a step has a condition (e.g. 'only if step 1 returns empty'), check before executing.",
         "- If you get a 422 error, read the validationMessages carefully and fix the request.",
         "- Do NOT retry more than once with the same payload — adjust based on the error.",
+        "- STOP CONDITIONS — if you see these errors, say DONE immediately, do not try to fix:",
+        "  * 'bankkontonummer' or 'bank account' errors → company setup issue, cannot fix via API",
+        "  * '405 Method Not Allowed' → endpoint is blocked by the proxy",
+        "  * Repeated same 422 error after 2 retries → move on to the next step or say DONE",
         "",
     ]
+
+    if knowledge_base:
+        lines.append("ACCOUNTING KNOWLEDGE BASE (follow these workflows):")
+        lines.append(knowledge_base)
+        lines.append("")
 
     if files:
         lines.append(f"ATTACHED FILES ({len(files)}):")
@@ -328,27 +419,9 @@ def _build_executor_prompt(plan_steps: list, files: list | None = None) -> str:
         props = req_body.get("properties", {})
         required_fields = set(req_body.get("required", []))
 
-        # Heuristic: _ref fields and enum fields are almost always required by Tripletex
-        # even when the OpenAPI spec doesn't mark them. Flag them prominently.
         if props:
             lines.append("  Request body fields:")
-            for fname, fschema in props.items():
-                ftype = fschema.get("type", "?")
-                ref = fschema.get("_ref", "")
-                enum = fschema.get("enum", [])
-                desc = fschema.get("description", "")
-                is_required = fname in required_fields
-
-                parts = [f"    - {fname}: {ftype}"]
-                if is_required:
-                    parts.append("REQUIRED")
-                if ref:
-                    parts.append(f'(linked entity → send {{"id": <int>}}, GET /{ref.lower()} to find ID)')
-                if enum:
-                    parts.append(f"(enum: {enum})")
-                if desc:
-                    parts.append(f"— {desc[:80]}")
-                lines.append(" ".join(parts))
+            _render_props(lines, props, required_fields, set(), indent=4)
 
         # Show query params for GET/action endpoints
         qparams = schema.get("query_params", [])
@@ -401,6 +474,12 @@ executor_agent = Agent[ToolContext](
         "- Query parameters go in the params argument. Do NOT append them to the endpoint URL.\n"
         "- If you get a 422 error, read the validationMessages in the response.\n"
         "  They tell you exactly which field is missing or wrong. Fix it and retry ONCE.\n"
+        "  SPECIAL CASE: If the error says the entity already exists (e.g. 'allerede registrert',\n"
+        "  'already exists', or 'allerede en bruker med denne e-postadressen'), do NOT retry.\n"
+        "  Instead, do a GET to find the existing entity and store its ID with store_step_result.\n"
+        "  Then continue to the next step. This counts as success.\n"
+        "- Do NOT send optional _ref fields (like resaleProduct, supplier, discountGroup) unless\n"
+        "  the task specifically asks for them. Sending them with wrong IDs causes validation errors.\n"
         "- You may make extra GET calls to resolve IDs (departments, categories) if needed.\n"
         "- When done with all steps, say DONE."
     ),
