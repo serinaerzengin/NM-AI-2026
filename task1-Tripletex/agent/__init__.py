@@ -1,3 +1,3 @@
-from agent.pipeline import run
+from agent.orchestrator import run
 
 __all__ = ["run"]

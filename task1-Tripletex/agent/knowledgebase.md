@@ -247,7 +247,7 @@ For supplier invoices: `POST /supplierInvoice/{invoiceId}/:addPayment`
       "month": 3,
       "specifications": [
         {"salaryType": {"id": "<base_salary_type_id>"}, "rate": 56900, "count": 1},
-        {"salaryType": {"id": "<bonus_type_id>"}, "amount": 15800, "count": 1}
+        {"salaryType": {"id": "<bonus_type_id>"}, "rate": 15800, "count": 1}
       ]
     }
   ]
@@ -256,7 +256,7 @@ For supplier invoices: `POST /supplierInvoice/{invoiceId}/:addPayment`
 
 **Key gotchas:**
 - Employee must have an active employment in the period. Check with `GET /employee/employment`.
-- Use `rate` for recurring amounts (base salary), `amount` for fixed one-time amounts (bonus).
+- ALWAYS use `rate` and `count` for ALL salary specifications — both base salary AND bonus. The `rate` field is REQUIRED on every specification. Do NOT use `amount` — it is auto-calculated from rate × count.
 - The `date` should be the last day of the salary month.
 - Use `generateTaxDeduction=true` query parameter to auto-calculate tax.
 
@@ -331,17 +331,22 @@ Do NOT include `countryCode` — the sandbox may not have countries enabled.
 ## Accounting Dimensions (Free Dimensions)
 
 **Workflow:**
-1. `POST /ledger/accountingDimensionName` — create the dimension with `{"name": "DimensionName"}`
+1. `POST /ledger/accountingDimensionName` — create the dimension with `{"dimensionName": "DimensionName", "active": true, "description": "DimensionName"}`
+   - IMPORTANT: use `dimensionName` NOT `name`
+   - Note the response — it contains the `dimensionIndex` (1, 2, or 3) assigned by Tripletex
 2. `POST /ledger/accountingDimensionValue` — create each value:
    - `displayName`: "ValueName" (the value label)
    - `number`: "1" (a unique number string)
-   - `dimensionIndex`: 1 (integer — which dimension slot: 1, 2, or 3)
-   - For the first custom dimension, use `dimensionIndex: 1`
-   - **DO NOT send `accountingDimensionName` — this field does not exist in the API**
+   - `dimensionIndex`: use the index from step 1 response (1, 2, or 3)
+   - `active`: true
+   - **DO NOT send `accountingDimensionName` or `name` — use `displayName` instead**
 3. Repeat step 2 for additional values (number="2", etc.)
 4. `GET /ledger/voucherType` — get voucher type ID
-5. `GET /ledger/account?number=<acct_num>` — get account IDs for both debit and credit
-6. `POST /ledger/voucher` with postings that reference the dimension values:
+5. `GET /ledger/account?number=<acct_num>&numberFrom=<acct_num>&numberTo=<acct_num>` — get account IDs for both debit and credit (use 1920 for bank)
+6. `POST /ledger/voucher` with postings that reference the dimension values.
+   **CRITICAL:** The `freeAccountingDimensionN` field must match the `dimensionIndex`.
+   If dimension was assigned index 1 → use `freeAccountingDimension1`.
+   If dimension was assigned index 2 → use `freeAccountingDimension2`.
 
 ```json
 {
@@ -401,6 +406,8 @@ Do NOT include `countryCode` — the sandbox may not have countries enabled.
 **Endpoint:** `POST /project`
 
 **Required:** `name`, `number`, `projectManager: {"id": <employee_id>}`, `startDate`
+
+**IMPORTANT:** `number` must be unique. Use a random-looking number like "10042" or a 5-digit number, NOT simple "1" or "2" which are likely taken.
 
 **Optionally linked to:** `customer`, `department`
 
