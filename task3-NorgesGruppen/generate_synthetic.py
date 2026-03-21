@@ -61,30 +61,23 @@ def load_data():
 
 def build_category_mapping(coco, meta):
     """Build category_id -> list of product image paths."""
-    name_to_product = {}
-    for p in meta["products"]:
-        if p["has_images"]:
-            name_to_product[p["product_name"]] = p
-
     cat_to_images = {}
     matched = 0
     for cat in coco["categories"]:
         cid = cat["id"]
-        cname = cat["name"]
-        if cname in name_to_product:
-            prod = name_to_product[cname]
-            barcode = prod["product_code"]
-            prod_dir = PRODUCT_DIR / barcode
-            paths = []
-            for img_type in ["front", "main"]:
-                for ext in [".jpg", ".jpeg", ".png"]:
-                    p = prod_dir / f"{img_type}{ext}"
-                    if p.exists():
-                        paths.append(p)
-                        break
-            if paths:
-                cat_to_images[cid] = paths
-                matched += 1
+        prod_dir = PRODUCT_DIR / f"cat{cid}"
+        if not prod_dir.exists():
+            continue
+        paths = []
+        for img_type in ["front", "main"]:
+            for ext in [".jpg", ".jpeg", ".png"]:
+                p = prod_dir / f"{img_type}{ext}"
+                if p.exists():
+                    paths.append(p)
+                    break
+        if paths:
+            cat_to_images[cid] = paths
+            matched += 1
 
     print(f"Category mapping: {matched}/{len(coco['categories'])} categories have product images")
     return cat_to_images
