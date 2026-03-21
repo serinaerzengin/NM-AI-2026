@@ -65,9 +65,12 @@ RULES:
 - Use $alias_field placeholders for IDs from prior steps (e.g. "$customer_id", "$department_0_id").
 - Path should NOT include /v2 prefix.
 - For PUT/DELETE with IDs, use placeholders: "/customer/$customer_id".
-- For existing entities, GET first. Only POST to create NEW ones.
+- CRITICAL — GET vs POST decision:
+  * If the task says "Register hours for X" / "Run payroll for X" / "X has an invoice" / "payment from X" → X ALREADY EXISTS. Use ONLY GET to find them. Do NOT plan a POST step.
+  * Only POST to create entities the task explicitly asks to CREATE (e.g. "Create employee", "Opprett kunde").
+  * When in doubt, use GET only. The sandbox has the entities pre-created.
 - FOLLOW knowledge base workflows when they match.
-- Minimize API calls — fewer = higher score.
+- Minimize API calls — fewer = higher score. Every unnecessary POST wastes time and may fail.
 
 Respond with valid JSON only. No markdown, no explanation."""
 
