@@ -19,6 +19,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 
 from agents import Agent, Runner, function_tool
@@ -35,8 +36,9 @@ model = LitellmModel(model=MODEL_ID)
 # ── Static resources ─────────────────────────────────────────────────────────
 
 SPECS_DIR = Path(__file__).parent.parent / "specs"
-INDEX_MD = (SPECS_DIR / "index.md").read_text()
+INDEX_MD = (SPECS_DIR / "index_slim.md").read_text()
 REGISTRY_PATH = SPECS_DIR / "registry.json"
+KNOWLEDGE_BASE = (Path(__file__).parent / "knowledgebase.md").read_text()
 
 
 def _load_registry() -> dict:
@@ -108,96 +110,40 @@ def _truncate(text: str, limit: int) -> str:
     return text[:limit] + "…" if len(text) > limit else text
 
 
-# ── Step 1: Translator ──────────────────────────────────────────────────────
+# ── Step 1+2: Translate & Rewrite (merged) ───────────────────────────────────
 
-translator_agent = Agent(
-    name="Translator",
+translate_rewrite_agent = Agent(
+    name="TranslateRewrite",
     model=model,
     instructions=(
-        "You are a translation specialist.\n\n"
-        "The user will provide a prompt in one of these languages: "
-        "Norwegian Bokmål, Nynorsk, English, Spanish, Portuguese, German, or French.\n\n"
-        "Your job:\n"
-        "1. If the prompt is already in English, return it unchanged.\n"
-        "2. Otherwise, translate ONLY the instruction words to English.\n\n"
-        "CRITICAL — Data values must NEVER be translated:\n"
-        "- Entity names in quotes (e.g. 'Buchhaltung', 'Servicio de Consultoría') → keep EXACTLY as written\n"
-        "- Person names → keep exactly as written\n"
-        "- Company names → keep exactly as written\n"
-        "- Product names → keep exactly as written\n"
-        "- Department names → keep exactly as written\n"
-        "- Email addresses → keep exactly as written\n"
-        "- Numbers, dates, currency amounts → keep exactly as written\n"
-        "- Norwegian characters (æ, ø, å) → keep exactly as written\n\n"
-        "Only translate the verbs and structural words around the data values.\n\n"
-        "Examples:\n"
-        "  IN:  \"Opprett en avdeling med navn 'Buchhaltung'\"\n"
-        "  OUT: \"Create a department named 'Buchhaltung'\"\n\n"
-        "  IN:  \"Crea un producto llamado 'Servicio de Consultoría' con un precio de 2500 NOK.\"\n"
-        "  OUT: \"Create a product named 'Servicio de Consultoría' with a price of 2500 NOK.\"\n\n"
-        "  IN:  \"Opprett en kunde med navn 'Fjord Tech AS'\"\n"
-        "  OUT: \"Create a customer named 'Fjord Tech AS'\"\n\n"
-        "Return ONLY the translation — no commentary, no labels, no JSON."
-    ),
-)
-
-
-async def step1_translate(raw_prompt: str, trace: PipelineTrace) -> str:
-    """Translate multilingual prompt to English. Sees ONLY the raw prompt."""
-    start = time.monotonic()
-    result = await Runner.run(translator_agent, input=raw_prompt)
-    english = result.final_output
-    trace.add(StepTrace(
-        step=1,
-        name="TRANSLATE",
-        input=raw_prompt,
-        output=english,
-        duration_ms=(time.monotonic() - start) * 1000,
-    ))
-    return english
-
-
-# ── Step 2: Query Rewriter ──────────────────────────────────────────────────
-
-rewriter_agent = Agent(
-    name="QueryRewriter",
-    model=model,
-    instructions=(
-        "You are a query clarification specialist for an accounting system.\n\n"
-        "You receive an English task description. Rewrite it to be unambiguous and explicit.\n\n"
-        "What to do:\n"
-        '- Map informal terms to standard accounting entity names:\n'
-        '  "worker"/"staff member" → employee\n'
-        '  "bill" → invoice\n'
-        '  "travel claim" → travel expense\n'
-        '  "supplier"/"vendor" → supplier\n'
-        '  "admin" → account administrator\n'
-        "- Make implicit actions explicit (e.g. 'invoice for Acme' implies customer must exist)\n"
-        "- Spell out what entities need to be created, modified, or looked up\n"
-        "- Preserve ALL exact values: names, emails, amounts, dates — copy them character-for-character\n\n"
-        "What NOT to do:\n"
-        "- Do NOT output JSON\n"
-        "- Do NOT reference specific API endpoints or paths\n"
-        "- Do NOT generate an execution plan or numbered steps\n"
-        "- Do NOT add information that wasn't in the original\n\n"
-        "Output format — plain English text structured as:\n"
-        "Task: [one sentence summary]\n"
-        "Entities: [entity type (field: \"value\", field: \"value\"), ...]\n"
-        "Actions: [what needs to happen in plain English]\n"
+        "You translate and clarify accounting task prompts.\n\n"
+        "The input may be in Norwegian, Nynorsk, English, Spanish, Portuguese, German, or French.\n\n"
+        "Do TWO things in one step:\n"
+        "1. Translate the instruction words to English (keep data values unchanged)\n"
+        "2. Clarify the result into a structured format\n\n"
+        "CRITICAL — Data values must NEVER be translated or changed:\n"
+        "- Names in quotes ('Buchhaltung', 'Servicio de Consultoría') → keep EXACTLY\n"
+        "- Person names, company names, product names, department names → keep EXACTLY\n"
+        "- Emails, numbers, dates, currency amounts, org numbers → keep EXACTLY\n"
+        "- Norwegian characters (æ, ø, å) → keep EXACTLY\n\n"
+        "Output format:\n"
+        "Task: [one sentence summary in English]\n"
+        "Entities: [entity type (field: \"value\", ...), ...]\n"
+        "Actions: [what needs to happen]\n"
         "Prerequisites: [what must exist first, or \"none\"]"
     ),
 )
 
 
-async def step2_rewrite(english_text: str, trace: PipelineTrace) -> str:
-    """Clarify and ground the English prompt. Sees ONLY the English text."""
+async def step1_translate_rewrite(raw_prompt: str, trace: PipelineTrace) -> str:
+    """Translate and clarify in one LLM call. Sees ONLY the raw prompt."""
     start = time.monotonic()
-    result = await Runner.run(rewriter_agent, input=english_text)
+    result = await Runner.run(translate_rewrite_agent, input=raw_prompt)
     clarified = result.final_output
     trace.add(StepTrace(
-        step=2,
-        name="REWRITE",
-        input=english_text,
+        step=1,
+        name="TRANSLATE_REWRITE",
+        input=raw_prompt,
         output=clarified,
         duration_ms=(time.monotonic() - start) * 1000,
     ))
@@ -290,34 +236,27 @@ decomposer_agent = Agent(
     instructions=(
         "You are a task planning specialist for the Tripletex accounting API.\n\n"
         "You receive a clarified task description. Your job:\n"
-        "1. FIRST: Scan the endpoint index below to identify which endpoints are relevant.\n"
-        "2. THEN: Use the lookup_endpoint tool to check each candidate endpoint's schema —\n"
-        "   see what fields it needs, which have _ref (linked entities), and what enum values are valid.\n"
-        "3. FINALLY: Build a MINIMAL plan — only the steps actually needed for this task.\n\n"
-        "IMPORTANT — _ref fields and efficiency:\n"
-        "When you see _ref fields in a schema, NOT all of them are needed. Only add a GET step\n"
-        "to resolve a _ref if:\n"
-        "  - The field is explicitly mentioned in the task (e.g. task says 'in department X')\n"
-        "  - The field is one of these commonly required fields that Tripletex enforces:\n"
-        "    * department (for employees) — ALWAYS resolve this\n"
-        "    * customer (for orders/invoices) — ALWAYS resolve if creating orders/invoices\n"
-        "  - The task clearly needs it\n\n"
-        "Do NOT add GET steps for every _ref field you see. Fields like phoneNumberMobileCountry,\n"
-        "internationalId, address, holidayAllowanceEarned, employeeCategory, discountGroup,\n"
-        "supplierProduct, deliveryAddress, etc. are OPTIONAL. Skip them unless the task mentions them.\n\n"
-        "Keep the plan SHORT. Fewer API calls = higher efficiency score.\n\n"
+        "1. FIRST: Check the KNOWLEDGE BASE below — it has proven workflows for common task types.\n"
+        "   If the task matches a known workflow, FOLLOW IT EXACTLY.\n"
+        "2. If no knowledge base match, scan the endpoint index to identify relevant endpoints.\n"
+        "3. Use the lookup_endpoint tool to check schemas for fields and _ref dependencies.\n"
+        "4. Build a MINIMAL plan — only the steps actually needed.\n\n"
+        "<knowledge_base>\n"
+        f"{KNOWLEDGE_BASE}\n"
+        "</knowledge_base>\n\n"
         "<endpoint_index>\n"
         f"{INDEX_MD}\n"
         "</endpoint_index>\n\n"
         "Rules:\n"
-        "- ALWAYS look up the schema for your main POST/PUT endpoints before writing the plan\n"
-        "- Only add prerequisite GET steps for fields the task actually needs\n"
-        "- Always resolve department for employees (Tripletex requires it)\n"
+        f"- Today's date is {date.today().isoformat()}. Use this for all date fields unless the task specifies otherwise.\n"
+        "- FOLLOW the knowledge base workflows when they match the task\n"
+        "- For employee creation: ONLY plan GET /department + POST /employee + PUT entitlement + POST employment (if startDate). Do NOT add GET /country or GET /employee/category.\n"
+        "- Only add prerequisite GET steps for _ref fields that are actually needed\n"
         "- Each step must map to exactly ONE API call\n"
         "- Include the HTTP method and path for each step\n"
         "- Mark dependencies with 'depends on: Step N'\n"
         "- Do NOT include authentication details\n"
-        "- KEEP THE PLAN MINIMAL — only steps that are necessary\n\n"
+        "- KEEP THE PLAN MINIMAL — fewer API calls = higher score\n\n"
         "Output format — numbered steps in plain text:\n\n"
         "Step 1: [description]\n"
         "  → endpoint: [METHOD /path]\n"
@@ -332,7 +271,7 @@ decomposer_agent = Agent(
 async def step3_decompose(clarified_text: str, trace: PipelineTrace) -> str:
     """Decompose into ordered to-do list. Sees clarified text + index.md + can look up registry."""
     start = time.monotonic()
-    result = await Runner.run(decomposer_agent, input=clarified_text, max_turns=15)
+    result = await Runner.run(decomposer_agent, input=clarified_text, max_turns=5)
     todo = result.final_output
     trace.add(StepTrace(
         step=3,
@@ -505,14 +444,13 @@ class PipelineResult:
 
 
 async def preprocess(prompt: str) -> PipelineResult:
-    """Run Steps 1-4: translate → rewrite → decompose → format.
+    """Run Steps 1-3: translate+rewrite → decompose → format.
 
     No credentials or files touch this function — those go straight to the executor.
     """
     trace = PipelineTrace()
 
-    english = await step1_translate(prompt, trace)
-    clarified = await step2_rewrite(english, trace)
+    clarified = await step1_translate_rewrite(prompt, trace)
     todo = await step3_decompose(clarified, trace)
     plan = step4_format(todo, trace)
 

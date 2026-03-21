@@ -156,20 +156,15 @@ def _growth_phase(state: SimState):
     living = state.get_living_settlements()
 
     for s in living:
-        # Food production (with carrying capacity)
+        # Food production — resets each year (no stockpiling)
         adj_forests = state.count_adjacent_forests(s.y, s.x)
-        food_production = p.base_food_production + p.food_per_forest * adj_forests
-        s.food += food_production
-        # Food cap — proportional to food production capacity
-        s.food = min(s.food, 1.5 + food_production * 2.5)
+        food_income = p.base_food_production + p.food_per_forest * adj_forests
+        s.food = food_income  # food is ANNUAL income, not cumulative
 
-        # Population growth (with carrying capacity)
-        if s.food > 0.5:
-            max_pop = 2.5 + adj_forests * 1.5
-            growth = 0.12 * s.food * max(0, 1 - s.population / max(max_pop, 1))
-            s.population += growth
-        # Population natural decay — slow drain
-        s.population *= 0.985
+        # Population growth (logistic)
+        max_pop = 2.0 + adj_forests * 1.5
+        if s.food > 0.3 and s.population < max_pop:
+            s.population += 0.15 * (1 - s.population / max_pop)
 
         # Port building
         if not s.has_port and state.is_coastal[s.y, s.x] and rng.random() < p.port_build_chance:
@@ -181,7 +176,7 @@ def _growth_phase(state: SimState):
             if rng.random() < 0.1:
                 s.has_longship = True
 
-        # Expansion
+        # Expansion — can try multiple times for high pop
         if s.population > p.expand_pop_threshold and rng.random() < p.expansion_rate:
             _try_expand(state, s)
 
@@ -190,25 +185,25 @@ def _try_expand(state: SimState, parent: SettlementState):
     rng = state.rng
     candidates = []
 
-    # Search within distance 1-3 for expansion targets
+    # Search within distance 1-5 for expansion targets
     py, px = parent.y, parent.x
-    for dy in range(-3, 4):
-        for dx in range(-3, 4):
+    for dy in range(-5, 6):
+        for dx in range(-5, 6):
             if dy == 0 and dx == 0:
                 continue
             ny, nx = py + dy, px + dx
             if not (0 <= ny < state.h and 0 <= nx < state.w):
                 continue
             dist = abs(dy) + abs(dx)
-            if dist > 3:
+            if dist > 5:
                 continue
             cell = state.grid[ny, nx]
             if cell in (OCEAN, MOUNTAIN, SETTLEMENT, PORT):
                 continue
             if not state.is_land[ny, nx]:
                 continue
-            # Weight: closer and plains preferred
-            weight = (4 - dist) / 3.0  # distance decay
+            # Weight: strong distance decay, plains preferred
+            weight = 1.0 / (dist * dist)  # inverse square distance decay
             if cell in (PLAINS, EMPTY):
                 weight *= 2.0
             elif cell == FOREST:
@@ -315,12 +310,12 @@ def _winter_phase(state: SimState):
 
     living = state.get_living_settlements()
     for s in living:
-        # Winter food cost: base cost + population-dependent cost
-        # Higher population = need more food to survive
-        food_cost = severity * (1.0 + 0.15 * s.population)
-        s.food -= food_cost
+        # Survival check: food income vs winter cost
+        # Settlements with low food income (few forests) are vulnerable
+        food_need = severity * (0.5 + 0.1 * s.population)
+        survival_margin = s.food - food_need
 
-        if s.food < 0:
+        if survival_margin < 0 or (survival_margin < 0.1 and rng.random() < 0.3):
             # Settlement collapses
             s.alive = False
             state.grid[s.y, s.x] = RUIN
