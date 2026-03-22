@@ -511,6 +511,29 @@ def generate_variant(bg_img, shelf_rows, shelf_bounds, cat_to_cutouts,
 
     num_rows = len(shelf_rows)
 
+    # Estimate perspective: compare x-centers of top vs bottom rows
+    # If shelves converge to one side, products on that side should be smaller
+    persp_scale_left = 1.0
+    persp_scale_right = 1.0
+    if num_rows >= 3:
+        top_center = (shelf_rows[0]["x_left"] + shelf_rows[0]["x_right"]) / 2
+        bot_center = (shelf_rows[-1]["x_left"] + shelf_rows[-1]["x_right"]) / 2
+        top_width = shelf_rows[0]["x_right"] - shelf_rows[0]["x_left"]
+        bot_width = shelf_rows[-1]["x_right"] - shelf_rows[-1]["x_left"]
+        # If the top row is narrower, perspective converges upward
+        # Width ratio tells us how much the shelf "shrinks"
+        if top_width > 0 and bot_width > 0:
+            width_ratio = min(top_width, bot_width) / max(top_width, bot_width)
+            # Only apply if noticeable perspective (ratio < 0.85)
+            if width_ratio < 0.85:
+                # Determine which side is "far" (narrower)
+                if shelf_rows[0]["x_left"] > shelf_rows[-1]["x_left"]:
+                    # Left side converges — products on left are "farther"
+                    persp_scale_left = width_ratio
+                elif shelf_rows[0]["x_right"] < shelf_rows[-1]["x_right"]:
+                    # Right side converges
+                    persp_scale_right = width_ratio
+
     # Step 1: Pack each shelf row densely left-to-right with product grouping
     for row_idx, row in enumerate(shelf_rows):
         shelf_y = row["y"]  # top of shelf edge strip (product bottom)
@@ -553,9 +576,18 @@ def generate_variant(bg_img, shelf_rows, shelf_bounds, cat_to_cutouts,
                 cutout_aspect = cw / ch
                 prod_w, prod_h = _sample_product_size(img_w, img_h, cutout_aspect)
 
-                # Apply shelf-position scaling
+                # Apply shelf-position scaling (vertical)
                 prod_w = int(prod_w * size_scale)
                 prod_h = int(prod_h * size_scale)
+
+                # Apply perspective scaling (horizontal)
+                if persp_scale_left < 1.0 or persp_scale_right < 1.0:
+                    row_width = row_right - row_left
+                    x_frac = (cursor_x - row_left) / max(row_width, 1)
+                    # Interpolate between left and right scale
+                    persp = persp_scale_left + (persp_scale_right - persp_scale_left) * x_frac
+                    prod_w = int(prod_w * persp)
+                    prod_h = int(prod_h * persp)
 
                 # Clamp height to available space on this shelf
                 if prod_h > avail_height:

@@ -214,3 +214,10 @@ task2-AstarIsland/CLAUDE.md
 task3-NorgesGruppen/outputs_dinov2_detr/*
 task2-AstarIsland/data/*
 catboost_info/
+# Task 3 models & submissions
+task3-NorgesGruppen/*.onnx
+task3-NorgesGruppen/*.pt
+task3-NorgesGruppen/*.zip
+task3-NorgesGruppen/models/
+task3-NorgesGruppen/submission/*.onnx
+task3-NorgesGruppen/.venv*/

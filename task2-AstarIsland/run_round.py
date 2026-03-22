@@ -41,7 +41,7 @@ RATE_LIMIT_DELAY = 0.25
 # Default adaptive params (from k-fold Optuna)
 DEFAULT_ADAPTIVE = {"a": -15.28, "b": 0.58, "c": 4.41}
 DEFAULT_K_PARAMS = {
-    "k_base": 49, "k_low_thresh": 0.041, "k_low": 72,
+    "k_base": 110, "k_low_thresh": 0.041, "k_low": 110,
     "k_mid_thresh": 0.149, "k_mid": 156,
 }
 
@@ -73,11 +73,24 @@ def load_catboost_params() -> dict:
 
 def load_adaptive_params() -> tuple[dict, dict]:
     """Load adaptive stat blending and k params."""
+    adaptive = DEFAULT_ADAPTIVE
+    k_params = DEFAULT_K_PARAMS
+
     if ADAPTIVE_PARAMS_PATH.exists():
         with open(ADAPTIVE_PARAMS_PATH) as f:
             data = json.load(f)
-        return data.get("adaptive_stats", DEFAULT_ADAPTIVE), data.get("k_params", DEFAULT_K_PARAMS)
-    return DEFAULT_ADAPTIVE, DEFAULT_K_PARAMS
+        adaptive = data.get("adaptive_stats", DEFAULT_ADAPTIVE)
+        k_params = data.get("k_params", DEFAULT_K_PARAMS)
+
+    # Override k_base from optuna-tuned best_k if available
+    if BEST_PARAMS_ALL_PATH.exists():
+        with open(BEST_PARAMS_ALL_PATH) as f:
+            all_params = json.load(f)
+        if "best_k" in all_params:
+            k_params = dict(k_params)
+            k_params["k_base"] = all_params["best_k"]
+
+    return adaptive, k_params
 
 
 def compute_historical_avg_stats(training_rounds: list[int]) -> RoundStats:

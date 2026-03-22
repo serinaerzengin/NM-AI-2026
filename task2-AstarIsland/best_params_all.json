@@ -10,11 +10,11 @@
     "min_child_weight": 18
   },
   "catboost": {
-    "iterations": 195,
+    "iterations": 563,
     "depth": 6,
-    "learning_rate": 0.02497151496678088,
-    "l2_leaf_reg": 2.794626398094844,
-    "subsample": 0.7748041090133269
+    "learning_rate": 0.01926141198973203,
+    "l2_leaf_reg": 5.64954825398669,
+    "subsample": 0.6914170993015648
   },
   "lightgbm": {
     "n_estimators": 334,
@@ -25,5 +25,6 @@
     "reg_alpha": 0.41856330189061824,
     "reg_lambda": 5.729188606239026,
     "min_child_samples": 40
-  }
+  },
+  "best_k": 139
 }
