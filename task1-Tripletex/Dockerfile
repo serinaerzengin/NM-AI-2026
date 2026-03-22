@@ -2,21 +2,16 @@ FROM python:3.13-slim
 
 WORKDIR /app
 
-# Install uv for fast dependency resolution
-COPY --from=ghcr.io/astral-sh/uv:latest /uv /uvx /bin/
+RUN pip install --no-cache-dir \
+    fastapi \
+    "uvicorn[standard]" \
+    httpx \
+    python-dotenv \
+    openai \
+    openai-agents \
+    openpyxl
 
-# Copy dependency files first (cache layer)
-COPY pyproject.toml uv.lock ./
+COPY *.py ./
+COPY skills/ ./skills/
 
-# Install dependencies
-RUN uv sync --frozen --no-dev
-
-# Copy application code
-COPY api.py .
-COPY agent/ agent/
-COPY specs/ specs/
-
-# Create logs directory
-RUN mkdir -p logs
-
-CMD ["uv", "run", "uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8080"]
+CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8080"]
