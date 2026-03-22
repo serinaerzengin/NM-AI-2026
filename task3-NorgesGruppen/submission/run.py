@@ -13,9 +13,8 @@ from ensemble_boxes import weighted_boxes_fusion
 # ── Config ──────────────────────────────────────────────────────────────
 # (filename, input_size)
 MODELS = [
-    ("epoch140.onnx", 800),
-    ("last_int8.onnx", 800),
-    ("best_final_int8.onnx", 800),
+    ("best1.onnx", 1280),
+    ("last.onnx", 800),
 ]
 CONF_THRESH = 0.05       # per-model threshold before fusion
 WBF_IOU_THRESH = 0.40    # WBF IoU threshold
