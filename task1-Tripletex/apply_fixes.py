@@ -1,8 +1,6 @@
 import sys
 from datetime import date
 
-TODAY = date.today().isoformat()
-
 
 def _valid_norwegian_nin(nin: str) -> bool:
     """Validate Norwegian fødselsnummer (11-digit NIN with checksums)."""
@@ -44,6 +42,8 @@ def _strip_vattype_from_bs_accounts(payload):
 
 
 def apply_fixes(path: str, method: str, payload):
+    today = date.today().isoformat()
+
     # Handle list payloads (e.g. /ledger/account/list)
     if isinstance(payload, list):
         if "/ledger/account" in path and method == "POST":
@@ -56,7 +56,7 @@ def apply_fixes(path: str, method: str, payload):
     # === VOUCHER FIXES ===
     if "/voucher" in path and isinstance(payload.get("postings"), list):
         payload.setdefault("description", "Bilag")
-        payload.setdefault("date", TODAY)
+        payload.setdefault("date", today)
         for i, p in enumerate(payload["postings"]):
             p["row"] = i + 1
             amt = p.get("amountGross")
@@ -66,7 +66,7 @@ def apply_fixes(path: str, method: str, payload):
                 amt = p.get("amountGrossCurrency")
             if amt is not None:
                 p["amountGross"] = amt
-                p["amountGrossCurrency"] = amt
+                p.setdefault("amountGrossCurrency", amt)
                 p.pop("amount", None)
             # Fix dimension field names → freeAccountingDimension1/2
             for wrong in ("dimension1", "accountingDimension1", "customDimension1"):
@@ -78,8 +78,8 @@ def apply_fixes(path: str, method: str, payload):
 
     # === ORDER FIXES ===
     if "/order" in path and method == "POST":
-        payload.setdefault("deliveryDate", payload.get("orderDate", TODAY))
-        payload.setdefault("orderDate", TODAY)
+        payload.setdefault("deliveryDate", payload.get("orderDate", today))
+        payload.setdefault("orderDate", today)
         for line in payload.get("orderLines", []):
             line.pop("vatType", None)
 
@@ -98,9 +98,9 @@ def apply_fixes(path: str, method: str, payload):
 
     # === SALARY FIXES ===
     if "/salary/transaction" in path:
-        payload.setdefault("date", TODAY)
-        payload.setdefault("year", int(TODAY[:4]))
-        payload.setdefault("month", int(TODAY[5:7]))
+        payload.setdefault("date", today)
+        payload.setdefault("year", int(today[:4]))
+        payload.setdefault("month", int(today[5:7]))
 
         # Fix: employee belongs on payslip, not transaction root
         root_employee = payload.pop("employee", None)
@@ -130,8 +130,11 @@ def apply_fixes(path: str, method: str, payload):
         _strip_vattype_from_bs_accounts(payload)
 
     # === PROJECT FIXES ===
-    if path.rstrip("/") == "/project" and method == "POST":
-        payload.setdefault("startDate", TODAY)
+    if path.rstrip("/") == "/project" and method in ("POST", "PUT"):
+        for bad in ("budget", "fixedPrice", "budgetAmount", "budgetIncome", "fixedprice", "isFixedPrice"):
+            payload.pop(bad, None)
+        if method == "POST":
+            payload.setdefault("startDate", today)
 
     # === EMPLOYEE FIXES ===
     if path.rstrip("/") == "/employee" and method == "POST":
@@ -142,7 +145,7 @@ def apply_fixes(path: str, method: str, payload):
             payload.pop("nationalIdentityNumber")
         for emp in payload.get("employments", []):
             emp.setdefault("isMainEmployer", True)
-            emp.setdefault("startDate", TODAY)
+            emp.setdefault("startDate", today)
 
     # === EMPLOYMENT DETAILS FIXES ===
     # Only add enum defaults when LLM is doing a full employment setup (has salary or percentage)
@@ -161,6 +164,9 @@ def apply_fixes(path: str, method: str, payload):
     # === SUPPLIER INVOICE FIXES ===
     if "/supplierInvoice" in path and method == "POST":
         payload.pop("dueDate", None)  # dueDate doesn't exist on supplierInvoice
+        voucher = payload.get("voucher")
+        if isinstance(voucher, dict):
+            voucher.pop("dueDate", None)
 
     # === TRAVEL EXPENSE COST FIXES ===
     if "/travelExpense/cost" in path and method == "POST":
@@ -263,7 +269,7 @@ async def create_employment(client, employee_id: int, start_date: str | None = N
     # First check if a division exists, create one if needed
     division_id = await _ensure_division(client)
 
-    effective_date = start_date or TODAY
+    effective_date = start_date or date.today().isoformat()
     payload = {
         "employee": {"id": employee_id},
         "startDate": effective_date,

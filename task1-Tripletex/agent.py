@@ -337,7 +337,7 @@ Args: path: API endpoint path. body: Request body as JSON string."""
                 result = await client.call("POST", path, json_data=payload)
                 if result["status"] < 400:
                     log.log(f"  AUTO: salary retry succeeded")
-                    return _truncate_response(result)
+                    return f"SUCCESS: Salary transaction created. {_truncate_response(result)}"
                 else:
                     log.log(f"  AUTO: salary retry FAILED ({result['status']})")
                     return f"Salary POST failed even after auto-creating employment (startDate={salary_start}). The employment may need a different startDate. RETRY the POST /salary/transaction call. Error: {_truncate_response(result, path=path)}"
@@ -345,17 +345,6 @@ Args: path: API endpoint path. body: Request body as JSON string."""
         if "bankkontonummer" in error_msg or "bank account" in error_msg.lower():
             await ensure_bank_account(client)
             return f"Bank account registered. Please retry. Error: {_truncate_response(result)}"
-
-    # Auto-onboard after successful employee creation
-    if result["status"] < 400 and path.rstrip("/") == "/employee" and isinstance(payload, dict):
-        value = result.get("data", {}).get("value", {})
-        emp_id = value.get("id")
-        company_id = value.get("companyId")
-        # Try to extract startDate from the payload (LLM sometimes includes it)
-        start_date = payload.get("startDate")
-        if emp_id and company_id:
-            log.log(f"  AUTO-ONBOARD: employee={emp_id}, company={company_id}")
-            await auto_onboard_employee(client, emp_id, company_id, start_date, logger=log)
 
     return _truncate_response(result)
 
@@ -501,6 +490,7 @@ def create_agent() -> Agent[TaskContext]:
         tools=[tripletex_get, tripletex_post, tripletex_put, tripletex_delete],
         model_settings=ModelSettings(
             temperature=0.1,
+            parallel_tool_calls=False,
             reasoning={
                 "effort": "high",
             },
@@ -525,18 +515,32 @@ async def run_agent(prompt: str, file_contents: list, tripletex_client: Triplete
     if file_contents:
         logger.log(f"FILES: {len(file_contents)} attachment(s)")
 
-    # Proactively set up bank account before agent starts (prevents invoice failures)
-    try:
-        await ensure_bank_account(tripletex_client)
-        logger.log("SETUP: bank account OK")
-    except ProxyTokenExpiredError:
-        logger.log("SETUP: PROXY TOKEN EXPIRED — aborting")
-        logger.flush(f"ABORTED proxy token expired | 0 turns | {tripletex_client.call_count} calls")
-        return {
-            "status": "error",
-            "api_calls": tripletex_client.call_count,
-            "errors": tripletex_client.error_count,
-        }
+    # Set up bank account proactively only for tasks that need invoices/payments
+    # Skip for simple tasks (create product/customer/supplier/employee/department) to save 1 write call
+    prompt_lower = prompt.lower()
+    needs_bank = any(w in prompt_lower for w in [
+        "faktura", "invoice", "factura", "rechnung", "fatura", "facture",
+        "betaling", "payment", "paiement", "pago", "pagamento", "zahlung",
+        "lønn", "salary", "payroll", "paie", "nómina",
+        "avstem", "reconcil", "kontoauszug",
+        "reise", "travel", "viaje", "déplacement",
+        "agio", "disagio", "valuta", "currency", "taux", "kurs",
+        "bilag", "voucher", "bokfør", "bokför",
+        "closing", "clôture", "cierre", "oppgjør", "oppgjer",
+        "kvittering", "reçu", "receipt", "recibo",
+    ])
+    if needs_bank:
+        try:
+            await ensure_bank_account(tripletex_client)
+            logger.log("SETUP: bank account OK")
+        except ProxyTokenExpiredError:
+            logger.log("SETUP: PROXY TOKEN EXPIRED — aborting")
+            logger.flush(f"ABORTED proxy token expired | 0 turns | {tripletex_client.call_count} calls")
+            return {
+                "status": "error",
+                "api_calls": tripletex_client.call_count,
+                "errors": tripletex_client.error_count,
+            }
 
     # Build input — wrap file content parts in a proper message for the SDK
     if file_contents:

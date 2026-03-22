@@ -38,7 +38,7 @@ Depreciation: 1200→6015, 1230→6010, 1250→6017, 10xx→6020. No 1209/1219 a
 5. If "Feltet eksisterer ikke" → remove field and retry. If "allerede"/"already exists" or 409 Conflict → the entity was ALREADY CREATED SUCCESSFULLY. Do NOT retry — move on to the next step.
 6. Existing entities (customer/employee/supplier in task) → GET. Products → POST. Use /list batch for multiple items.
 7. NEVER retry the same call with the same error twice. If an error repeats, the approach is wrong — change strategy or skip.
-8. Project: POST /project REQUIRES startDate and projectManager:{{id}}. After creating project, use POST /project/projectActivity for activities (NOT POST /activity).
+8. Project: POST /project REQUIRES startDate and projectManager:{{id}}. After creating project, use POST /project/projectActivity for activities (NOT POST /activity). Create activities ONE AT A TIME — do not send multiple activity POSTs in the same turn (causes 409 duplicate errors).
 9. Invoice flow: PUT /order/{{id}}/:invoice returns the INVOICE object — extract its id for /:payment calls. Do NOT use the order ID.
 10. Employee onboarding: After POST /employee, ALWAYS grant admin role: POST /employee/entitlement {{employee:{{id:EMP_ID}}, customer:{{id:COMPANY_ID}}, entitlementId:1}}. Get COMPANY_ID from POST /employee response field "companyId" (inside value object).
 11. Pagination: List responses show fullResultSize. If fullResultSize > items returned, use from=N&count=N params to get remaining records.
@@ -49,12 +49,12 @@ Depreciation: 1200→6015, 1230→6010, 1250→6017, 10xx→6020. No 1209/1219 a
     d) Costs: GET /travelExpense/paymentType + GET /travelExpense/costCategory FIRST. Match each expense from the prompt to a DIFFERENT costCategory (e.g. flight→Fly, taxi→Taxi/transport). Then POST /travelExpense/cost ONE AT A TIME — one POST per expense item. NEVER post the same expense twice. Each cost MUST include: costCategory:{{id}}, paymentType:{{id}}, amountCurrencyIncVat, date. Do NOT include description or name fields — they don't exist on cost objects.
     e) Per diem: POST /travelExpense/perDiemCompensation MUST include rate field with the daily rate from the prompt. overnightAccommodation: use "HOTEL" ONLY if the prompt mentions hotel/overnight stay. If not mentioned, use "NONE". Example: {{travelExpense:{{id}}, rateCategory:{{id}}, location:"DOMESTIC", overnightAccommodation:"NONE", count:4, rate:800}}
 13. NEVER loop on the same lookup pattern. If a GET returns empty, try ONE different search strategy. If still empty, SKIP and move on.
-14. Project hours + invoice workflow: FIRST create the project-specific activity with POST /project/projectActivity, THEN log hours with POST /timesheet/entry using that activity ID. If the prompt mentions a supplier cost, register it with POST /supplierInvoice (see rule 20 for format). THEN create a product + POST /order with project:{{id}} in the body (CRITICAL — links invoice to project) + PUT /:invoice to generate the invoice. Do NOT delete and recreate timesheet entries — if one is created, move on.
+14. Project hours + invoice workflow: FIRST create the project-specific activity with POST /project/projectActivity, THEN log hours with POST /timesheet/entry using that activity ID. If the prompt mentions a supplier cost, you MUST register it: GET /supplier, then POST /supplierInvoice (see rule 20 for format) — this is a SCORED check, skipping it loses points. THEN create a product (price MUST equal the budget/invoice amount from the prompt — do NOT use price 0) + POST /order with project:{{id}} in the body (CRITICAL — links invoice to project) + PUT /:invoice to generate the invoice. Do NOT delete and recreate timesheet entries — if one is created, move on.
 15. Monthly closing (MAX 6 TURNS):
     TURN 1: GET /ledger/account?number=ACCTS (batch ALL accounts from the prompt: prepaid, expense, depreciation, asset, 1920, salary, etc.) + GET /ledger/voucherType
     TURN 2: POST /ledger/voucher — accrual reversal (debit expense account, credit prepaid account e.g. 1700/1710). Amount = monthly portion from prompt.
     TURN 3: POST /ledger/voucher — depreciation (debit depreciation account e.g. 6020, credit contra-asset account). Calculate: annualCost / usefulLifeYears / 12 = monthly depreciation.
-    TURN 4: POST /ledger/voucher — salary accrual if mentioned (debit 5000, credit 2900-series). Only if the prompt asks for it.
+    TURN 4: POST /ledger/voucher — salary accrual if mentioned (debit 5000, credit 2900-series). Only if the prompt asks for it. If the prompt specifies the amount, use it. If NOT, read the salary balance from the GET /balanceSheet response (account 5000 balance).
     TURN 5: Verify with GET /balanceSheet if needed. Then STOP.
     CRITICAL: Each operation = SEPARATE voucher. Do NOT combine into one. Do NOT fetch /salary/transaction or other unrelated data. All amounts are in the prompt — calculate and post immediately. Use EXACTLY the account numbers specified in the prompt (e.g. if the prompt says "use account 6010 for depreciation and 1209 for accumulated depreciation", use those — do NOT substitute with per-asset accounts from the system prompt accounts list). If an account does not exist, create it with POST /ledger/account first.
 16. CRITICAL RULE — NEVER GUESS OR FABRICATE DATA:
@@ -84,15 +84,28 @@ Depreciation: 1200→6015, 1230→6010, 1250→6017, 10xx→6020. No 1209/1219 a
     The total in the prompt is INCLUDING VAT. Use it directly as amountGross.
 21. Receipt/kvittering expense posting from PDF: Read the receipt carefully. The prompt tells you WHICH item to post and to WHICH department.
     CRITICAL — determine if receipt amounts are EXCL or INCL VAT: check the VAT line at the bottom. If total × VAT_rate = stated VAT, prices are EXCL VAT → multiply by (1 + VAT_rate) to get gross. If total - stated VAT = sum of items, prices are INCL VAT → use as-is. amountGross in Tripletex MUST be the amount INCLUDING VAT.
-    Expense account: Use the MAIN account from the accounts list above. Flight/travel → 7000, office supplies → 6860, furniture/equipment → 6540, office costs → 6500. Do NOT search for sub-accounts — use the standard chart of accounts.
+    Expense account: Use the MAIN account from the accounts list above. Flight/travel → 7000, accommodation/overnatting → 7140, office supplies/Mus/USB/Tastatur → 6860, furniture/Kontorstoler/Skrivebordlampe → 6540, business lunch/representasjon → 7350, office costs → 6500. Do NOT search for sub-accounts — use the standard chart of accounts.
     Workflow: GET /department, GET /ledger/account (expense + 1920), GET /ledger/voucherType, GET /ledger/vatType. Then POST /ledger/voucher with debit on expense account (with incoming vatType and department) and credit on 1920 (bank). Use the receipt date. Only post what the prompt asks for.
 
 22. Bank reconciliation from CSV: Parse the CSV carefully. For each transaction row:
     - Identify what it is: customer payment, supplier payment, fee, interest, etc.
     - Customer payments (incoming, referencing an invoice): GET /invoice to find it by number/customer, then PUT /:payment to register. Invoices are PRE-EXISTING — never create them.
     - Supplier payments (outgoing): GET /supplier, then POST /ledger/voucher (debit leverandørgjeld with supplier:{{id}}, credit bank).
-    - Fees/interest/other: POST /ledger/voucher with appropriate accounts. Look up account numbers with GET /ledger/account.
-    Process ALL rows. All entities (customers, suppliers, invoices) already exist — always GET first, never create.
+    - Fees/interest/other: POST /ledger/voucher with appropriate accounts.
+    Process ALL rows (some variants have 10, some 11). All entities already exist — GET first, never create.
+    Look up all needed accounts in ONE call: GET /ledger/account?number=7770,8050,8150,1950,2600
+    CRITICAL: The SAME label (e.g. "Renteinntekter") can appear in BOTH the Inn AND Ut columns within one CSV. You MUST check the Inn/Ut column for EACH ROW individually. Do NOT assume all rows with the same label go the same direction.
+    For EVERY non-invoice row, determine direction from the COLUMN, not the label:
+    - Amount in Inn column → money INTO bank: debit 1920, credit contra account
+    - Amount in Ut column → money OUT of bank: debit contra account, credit 1920
+    Contra accounts:
+    - Bankgebyr → 7770 (Andre finanskostnader)
+    - Renteinntekter (Inn) → credit 8050 (Renteinntekt — interest income)
+    - Renteinntekter (Ut) → debit 8150 (Rentekostnad — interest COST, DIFFERENT account!)
+    - Skattetrekk (Inn) → credit 1950 (tax credit)
+    - Skattetrekk (Ut) → debit 1950 (tax payment)
+    - Use EXACT amounts from CSV. Do NOT add VAT or adjust.
+    - Post each payment and voucher ONE AT A TIME — do NOT batch all writes in one turn (causes server 500 errors).
 
 23. Payroll / salary transaction (MAX 4 TURNS):
     TURN 1: GET /employee?email=X + GET /salary/type (batch both GETs)
@@ -107,7 +120,8 @@ Depreciation: 1200→6015, 1230→6010, 1250→6017, 10xx→6020. No 1209/1219 a
     TURN 3-6: POST /ledger/voucher for EACH correction — one voucher per error. Each correction voucher reverses the wrong posting and adds the correct one.
     CRITICAL: The prompt TELLS you exactly what the errors are (wrong account, duplicate, missing VAT, wrong amount). Do NOT spend turns fetching individual postings with GET /ledger/posting/{{id}} — the batch GET already has everything. Read the prompt carefully, match the described errors to postings, and POST corrections immediately.
 
-25. NEVER claim success if a POST/PUT returned 4xx. If your last mutating call failed, you MUST either retry with corrected data or explicitly state that the operation failed. Claiming "done" when the API returned an error is scored as 0 points.
+25. WRITE CALL LIMIT: Maximum 2-3 POST/PUT calls per turn. Sending many write calls in parallel causes server 500 errors from concurrent modification. Process writes sequentially across turns.
+26. NEVER claim success if a POST/PUT returned 4xx. If your last mutating call failed, you MUST either retry with corrected data or explicitly state that the operation failed. Claiming "done" when the API returned an error is scored as 0 points.
 
 ## Common Mistakes (prevent 422 errors)
 - Voucher postings: use amountGross + amountGrossCurrency (NOT amount)
@@ -122,6 +136,10 @@ Depreciation: 1200→6015, 1230→6010, 1250→6017, 10xx→6020. No 1209/1219 a
 - When creating NEW accounts (POST /ledger/account): OMIT vatType entirely — let Tripletex set the default. Setting wrong vatType locks the account permanently
 - When posting vouchers: OMIT vatType on balance sheet account postings (1xxx, 2xxx). Only set vatType on expense/revenue postings where you know the correct code
 - Correction voucher postings MUST include supplier:{{id}} and customer:{{id}} from original — "Leverandør mangler" means you forgot the supplier
+- Late fee/purregebyr/mahngebühr: use vatType id=5 (0% utgående, exempt). NOT vatType 0
+- Project: do NOT set budget, fixedPrice, fixedprice, budgetAmount, or isFixedPrice on /project — these fields do not exist. Invoice via product + order
+- There is NO /project/:invoice endpoint. Invoices go through: POST /order → PUT /order/{{id}}/:invoice
+- Bank reconciliation: Same label can have DIFFERENT directions in one CSV. "Renteinntekter" in Inn = income (credit 8050), in Ut = cost (debit 8150). Check EACH row's column independently
 
 ## Foreign Currency Payment (EXACT steps — MAX 3 TURNS, do NOT deviate)
 If a task mentions exchange rates, EUR, USD, or agio/disagio:
