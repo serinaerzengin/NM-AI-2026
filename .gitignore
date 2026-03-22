@@ -245,3 +245,6 @@ task3-NorgesGruppen/logs/*
 # Agent logs (keep directory, ignore contents)
 task1-Tripletex/logs/*
 !task1-Tripletex/logs/.gitkeep
+
+# Received task files (saved from competition submissions)
+task1-Tripletex/received_tasks/

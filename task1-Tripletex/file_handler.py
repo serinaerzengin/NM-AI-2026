@@ -24,10 +24,8 @@ async def process_files(files: list) -> list:
                 # Format as text table
                 if rows:
                     text = f"=== CSV File: {filename} ===\n"
-                    for i, row in enumerate(rows[:200]):  # cap at 200 rows
+                    for row in rows:
                         text += " | ".join(str(c) for c in row) + "\n"
-                    if len(rows) > 200:
-                        text += f"... ({len(rows) - 200} more rows)\n"
                     parts.append({"type": "input_text", "text": text})
             except Exception as e:
                 parts.append({"type": "input_text", "text": f"Error reading CSV {filename}: {e}"})
@@ -41,10 +39,7 @@ async def process_files(files: list) -> list:
                 for sheet_name in wb.sheetnames:
                     ws = wb[sheet_name]
                     text += f"\n--- Sheet: {sheet_name} ---\n"
-                    for i, row in enumerate(ws.iter_rows(values_only=True)):
-                        if i >= 200:
-                            text += "... (more rows)\n"
-                            break
+                    for row in ws.iter_rows(values_only=True):
                         text += " | ".join(str(c) if c is not None else "" for c in row) + "\n"
                 wb.close()
                 parts.append({"type": "input_text", "text": text})
@@ -62,7 +57,7 @@ async def process_files(files: list) -> list:
                 with pdfplumber.open(io.BytesIO(raw)) as pdf:
                     text = f"=== PDF File: {filename} ===\n"
                     has_text = False
-                    for i, page in enumerate(pdf.pages[:20]):
+                    for i, page in enumerate(pdf.pages):
                         page_text = page.extract_text() or ""
                         if page_text.strip():
                             has_text = True
@@ -75,8 +70,6 @@ async def process_files(files: list) -> list:
                     import pypdfium2
                     pdf_doc = pypdfium2.PdfDocument(io.BytesIO(raw))
                     for i, page in enumerate(pdf_doc):
-                        if i >= 5:
-                            break
                         bitmap = page.render(scale=2)
                         pil_image = bitmap.to_pil()
                         img_buf = io.BytesIO()
@@ -91,7 +84,7 @@ async def process_files(files: list) -> list:
             # Try as text
             try:
                 raw = base64.b64decode(content_b64).decode("utf-8", errors="replace")
-                parts.append({"type": "input_text", "text": f"=== File: {filename} ===\n{raw[:5000]}"})
+                parts.append({"type": "input_text", "text": f"=== File: {filename} ===\n{raw}"})
             except Exception:
                 parts.append({"type": "input_text", "text": f"[Binary file: {filename}, cannot display]"})
 

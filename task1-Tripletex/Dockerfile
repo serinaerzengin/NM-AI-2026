@@ -9,9 +9,12 @@ RUN pip install --no-cache-dir \
     python-dotenv \
     openai \
     openai-agents \
-    openpyxl
+    openpyxl \
+    pdfplumber \
+    google-cloud-storage
 
 COPY *.py ./
+COPY *.json ./
 COPY skills/ ./skills/
 
 CMD ["uvicorn", "api:app", "--host", "0.0.0.0", "--port", "8080"]

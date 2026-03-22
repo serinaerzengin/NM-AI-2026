@@ -11,11 +11,11 @@ Auto-generated datasets: `runs_dataset.jsonl` (run logs), `task_dataset.jsonl` (
 
 | ID | Gap | Task# | Task Type | Root Cause | Status |
 |----|-----|-------|-----------|------------|--------|
-| I-01 | 4.00 | 11 | `employee_onboarding_pdf` | Occupation code loop + PDF possibly not read by Gemini | v8: turn limits + v9: PDF input_file |
+| I-01 | 4.00 | 11 | `employee_onboarding_pdf` | pdfplumber missing from Dockerfile + occupationCode stripped + entitlement skipped | **v10: FIXED** (5 root causes addressed) |
 | I-02 | 3.00 | 12 | `project_lifecycle` | Delete/recreate timesheet loops, never invoices | v8: rule 15 workflow guidance |
 | I-03 | 1.80 | 20 | `payroll` | arbeidsforhold error → auto-employment slow, LLM claims done | v7: auto-retry in apply_fixes |
 | I-04 | 1.33 | 09 | `travel_expense` | paymentType missing, parallel costs → RevisionException | v7: skills update, v8: rule 12 |
-| I-05 | 1.33 | 10 | `foreign_currency` | Minor agio/disagio calc errors | OPEN — needs investigation |
+| I-05 | 1.33 | 10 | `foreign_currency` | LLM thinking loop timeout (197s without acting) | **v11: FX workflow in system prompt** |
 | I-06 | 1.27 | 13 | `cost_analysis` | Pagination truncates ledger data | v7: fullResultSize fix |
 | I-07 | 1.20 | 25 | `ledger_error_correction` | Slow individual posting lookups, sometimes times out | OPEN — needs batch strategy |
 | I-08 | 1.09 | 29 | `project_hours_invoice` | Stale cache after POST, activity confusion | v9: cache invalidation |
@@ -47,6 +47,33 @@ Auto-generated datasets: `runs_dataset.jsonl` (run logs), `task_dataset.jsonl` (
 ---
 
 ## Version History
+
+### v11 (00072, 2026-03-22)
+**Focus: Fix 3 verified production issues from scoring analysis**
+
+1. **FIXED: Auto-onboard employment conflict (Issue 1)** — `auto_onboard_employee()` was creating employment with `startDate=TODAY` which conflicted when the LLM later tried to create employment with the correct startDate from the PDF/prompt (409 RevisionException). Fix: removed auto-employment from onboard, only ALL_PRIVILEGES grant remains. LLM handles employment since it knows the correct startDate. Verified on sandbox: 0 errors, correct startDate.
+2. **FIXED: Supplier invoice dueDate strip (Issue 4)** — LLM sent `dueDate` on POST /supplierInvoice → 422 "Feltet eksisterer ikke" → wasted 1 call + 1 error. Fix: `apply_fixes.py` now strips `dueDate` from supplierInvoice payloads automatically.
+3. **FIXED: FX payment workflow visibility (Issue 2)** — FX workflow was only in `skills/put.md` which loads on first PUT call. But the LLM gets stuck thinking BEFORE making any PUT. Fix: moved FX step-by-step workflow into system prompt so LLM sees it from turn 0. Added "do NOT spend time analyzing postings — just register payment and book difference."
+4. **FIXED: Dynamic instructions had wrong time budget** — Said "120s budget" but actual budget is 240s. Updated thresholds: warn at 120s, critical at 180s.
+
+Files changed: `apply_fixes.py`, `agent.py`, `system_prompt.py`
+
+### v10 (2026-03-22)
+**Focus: Task 11 (employee_onboarding_pdf) — 0/4.0 → targeting full score**
+
+Root cause analysis found 5 issues, all fixed:
+
+1. **CRITICAL: pdfplumber missing from Dockerfile** — pyproject.toml had it but Dockerfile did not. All PDF extraction failed in production. Agent fabricated employee data instead of reading the contract. This single bug caused the entire 0 score.
+2. **occupationCode stripped by apply_fixes** — `payload.pop("occupationCode", None)` removed it from every employment details POST. The GET endpoint actually works (proven by runs 08ed9fb1, 438753da). Removed the stripping.
+3. **System prompt said occupationCode is [BETA]/403** — Wrong. Rewrote rules 16-17 with correct occupation code lookup strategy: `?nameNO=KEYWORD`, max 3 attempts, then skip.
+4. **Entitlement (admin role) often skipped** — Was in separate rule 10, not in PDF workflow. Now step c in the mandatory 7-step workflow (a-g) with "MANDATORY" label.
+5. **employmentType enum values undocumented** — Agent guessed wrong values from non-English PDFs (e.g. "FAST"). Added all valid enums: ORDINARY/MARITIME/FREELANCE, PERMANENT/TEMPORARY, MONTHLY_WAGE/HOURLY_WAGE/etc.
+
+Also added:
+- **File-saving logic in api.py** — Saves incoming files (PDFs, CSVs, images) to `received_tasks/{req_id}/` with prompt.txt and metadata.json. Enables local analysis of competition data and task replay.
+- `received_tasks/` added to .gitignore
+
+Files changed: `Dockerfile`, `apply_fixes.py`, `system_prompt.py`, `api.py`, `.gitignore`
 
 ### v9 (00054, 2026-03-22)
 - Cache invalidation on POST/PUT/DELETE (not just DELETE)
