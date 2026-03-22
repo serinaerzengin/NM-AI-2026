@@ -1,0 +1,371 @@
+"""Experiment: Adaptive blending of observation stats vs historical stats.
+
+When observations are unreliable (high-activity rounds, few observations),
+trust historical/model stats more. Learn the optimal blending function.
+
+Uses Optuna to find parameters for:
+  obs_weight = sigmoid(a * obs_settle_rate + b * obs_divergence + c)
+  final_stats = obs_weight * obs_stats + (1 - obs_weight) * hist_stats
+
+Trains CatBoost on rounds without observations (R1-5),
+validates on rounds with observations (R6-R12).
+"""
+
+import json
+import sys
+from pathlib import Path
+
+import numpy as np
+import optuna
+
+sys.path.insert(0, str(Path(__file__).parent.parent))
+
+from astar.types import MapState, Observation, RoundStats, NUM_CLASSES, OCEAN, MOUNTAIN
+from astar.features import compute_features
+from astar.calibration import (
+    compute_round_stats_from_ground_truth,
+    compute_round_stats_from_observations,
+    round_stats_to_array,
+)
+from astar.predictor import _build_row, _static_prediction, _is_static_cell
+from astar.scoring import score_prediction
+from astar.empirical_bins import (
+    build_empirical_distributions, get_bin_coverage_stats,
+    _cell_bin_key, _cell_bin_key_coarse,
+)
+from catboost import CatBoostRegressor
+import store
+
+DATA_DIR = Path(__file__).parent.parent / "data" / "rounds"
+SEEDS = list(range(5))
+PROB_FLOOR = 0.0005
+
+# Rounds with observations for validation
+VAL_ROUNDS_WITH_OBS = [6, 7, 8, 9, 10, 11, 12]
+TRAIN_ROUNDS = list(range(1, 6))
+
+_cache = {}
+
+
+def load_map(rn, si):
+    key = (rn, si)
+    if key not in _cache:
+        sd = DATA_DIR / f"round_{rn}" / f"seed_{si}"
+        with open(sd / "initial_state.json") as f:
+            raw = json.load(f)
+        with open(sd / "ground_truth.json") as f:
+            gt_raw = json.load(f)
+        _cache[key] = (
+            MapState(grid=np.array(raw["grid"]), settlements=raw["settlements"]),
+            np.array(gt_raw["ground_truth"]),
+        )
+    return _cache[key]
+
+
+def round_stats_avg(rn):
+    stats = []
+    for si in SEEDS:
+        s, gt = load_map(rn, si)
+        stats.append(compute_round_stats_from_ground_truth(gt, s))
+    fields = ["ruin_rate", "settlement_rate", "port_rate", "expansion_distance",
+              "forest_rate", "empty_rate", "settlement_to_ruin_ratio"]
+    return RoundStats(**{f: np.mean([getattr(s, f) for s in stats]) for f in fields})
+
+
+def load_obs(rn, si):
+    out = []
+    for raw in store.list_observations(rn, si):
+        if isinstance(raw, list):
+            raw = raw[0]
+        vp = raw["viewport"]
+        out.append(Observation(
+            grid=np.array(raw["grid"]), settlements=raw.get("settlements", []),
+            viewport=(vp["x"], vp["y"], vp["w"], vp["h"]), seed_index=si,
+        ))
+    return out
+
+
+def sigmoid(x):
+    return 1.0 / (1.0 + np.exp(-np.clip(x, -20, 20)))
+
+
+def blend_stats(obs_stats, hist_stats, obs_weight):
+    """Blend observation stats and historical stats."""
+    fields = ["ruin_rate", "settlement_rate", "port_rate", "expansion_distance",
+              "forest_rate", "empty_rate", "settlement_to_ruin_ratio"]
+    blended = {}
+    for f in fields:
+        blended[f] = obs_weight * getattr(obs_stats, f) + (1 - obs_weight) * getattr(hist_stats, f)
+    return RoundStats(**blended)
+
+
+def precompute():
+    """Precompute everything needed for evaluation."""
+    data = {}
+
+    # Training data
+    X_rows, y_rows, w_rows = [], [], []
+    for rn in TRAIN_ROUNDS:
+        stats = round_stats_avg(rn)
+        stats_arr = round_stats_to_array(stats)
+        for si in SEEDS:
+            state, gt = load_map(rn, si)
+            features = compute_features(state)
+            eps = 1e-12
+            entropy = -np.sum(gt * np.log(gt + eps), axis=-1)
+            for r in range(40):
+                for c in range(40):
+                    if _is_static_cell(state.grid[r, c], gt[r, c]):
+                        continue
+                    X_rows.append(_build_row(features[r, c], stats_arr))
+                    y_rows.append(gt[r, c])
+                    w_rows.append(entropy[r, c] + 0.1)
+
+    data["train_X"] = np.array(X_rows, dtype=np.float32)
+    data["train_y"] = np.array(y_rows, dtype=np.float32)
+    data["train_w"] = np.array(w_rows, dtype=np.float32)
+
+    # Historical average stats (from training rounds)
+    hist_stats_list = [round_stats_avg(rn) for rn in TRAIN_ROUNDS]
+    fields = ["ruin_rate", "settlement_rate", "port_rate", "expansion_distance",
+              "forest_rate", "empty_rate", "settlement_to_ruin_ratio"]
+    data["hist_stats"] = RoundStats(
+        **{f: np.mean([getattr(s, f) for s in hist_stats_list]) for f in fields}
+    )
+
+    # Validation data
+    for rn in VAL_ROUNDS_WITH_OBS:
+        states, all_obs = [], []
+        for si in SEEDS:
+            state, _ = load_map(rn, si)
+            states.append(state)
+            all_obs.extend(load_obs(rn, si))
+
+        if not all_obs:
+            continue
+
+        obs_stats = compute_round_stats_from_observations(all_obs, states[0])
+        gt_stats = round_stats_avg(rn)
+        bin_dists = build_empirical_distributions(all_obs, states)
+        bin_counts = get_bin_coverage_stats(all_obs, states)
+
+        val_seeds = []
+        for si in SEEDS:
+            state, gt = load_map(rn, si)
+            features = compute_features(state)
+            val_seeds.append({
+                "state": state, "gt": gt, "features": features,
+            })
+
+        data[f"val_{rn}"] = {
+            "seeds": val_seeds,
+            "obs_stats": obs_stats,
+            "gt_stats": gt_stats,
+            "bin_dists": bin_dists,
+            "bin_counts": bin_counts,
+            "states": states,
+        }
+
+    return data
+
+
+def evaluate_config(data, models, adaptive_params, k_params):
+    """Evaluate a specific adaptive stats + k configuration."""
+    a, b, c_param = adaptive_params["a"], adaptive_params["b"], adaptive_params["c"]
+    k_base = k_params["k_base"]
+    k_low_thresh = k_params["k_low_thresh"]
+    k_low = k_params["k_low"]
+    k_mid_thresh = k_params["k_mid_thresh"]
+    k_mid = k_params["k_mid"]
+
+    hist_stats = data["hist_stats"]
+    hist_settle = hist_stats.settlement_rate
+
+    round_scores = {}
+
+    for rn in VAL_ROUNDS_WITH_OBS:
+        key = f"val_{rn}"
+        if key not in data:
+            continue
+
+        rd = data[key]
+        obs_stats = rd["obs_stats"]
+        bin_dists = rd["bin_dists"]
+        bin_counts = rd["bin_counts"]
+
+        # Compute adaptive obs_weight
+        obs_settle = obs_stats.settlement_rate
+        divergence = abs(obs_settle - hist_settle) / (hist_settle + 1e-6)
+        obs_weight = sigmoid(a * obs_settle + b * divergence + c_param)
+
+        blended = blend_stats(obs_stats, hist_stats, obs_weight)
+        stats_arr = round_stats_to_array(blended)
+
+        # Adaptive k
+        settle = blended.settlement_rate
+        if settle < k_low_thresh:
+            k = k_low
+        elif settle < k_mid_thresh:
+            k = k_mid
+        else:
+            k = k_base
+
+        seed_scores = []
+        for sd in rd["seeds"]:
+            state, gt, features = sd["state"], sd["gt"], sd["features"]
+            h, w = state.grid.shape
+            probs = np.zeros((h, w, NUM_CLASSES), dtype=np.float32)
+
+            dyn, Xp = [], []
+            for r in range(h):
+                for c in range(w):
+                    sp = _static_prediction(state.grid[r, c])
+                    if sp is not None:
+                        probs[r, c] = sp
+                    else:
+                        dyn.append((r, c))
+                        Xp.append(_build_row(features[r, c], stats_arr))
+
+            if Xp:
+                preds = np.column_stack([
+                    np.zeros(len(Xp)) if m is None else m.predict(np.array(Xp, np.float32))
+                    for m in models
+                ])
+                for (r, c), pred in zip(dyn, preds):
+                    probs[r, c] = pred
+
+            # Empirical bin blending
+            for r in range(h):
+                for c in range(w):
+                    if state.grid[r, c] in (OCEAN, MOUNTAIN):
+                        continue
+                    bk = _cell_bin_key(features[r, c])
+                    if bk is None or bk not in bin_dists:
+                        bk = _cell_bin_key_coarse(features[r, c])
+                    if bk is not None and bk in bin_dists:
+                        n = bin_counts.get(bk, 0)
+                        weight = n / (n + k)
+                        probs[r, c] = weight * bin_dists[bk] + (1 - weight) * probs[r, c]
+
+            probs = np.maximum(probs, PROB_FLOOR)
+            probs = probs / probs.sum(axis=-1, keepdims=True)
+            seed_scores.append(score_prediction(probs, gt))
+
+        round_scores[rn] = np.mean(seed_scores)
+
+    return round_scores
+
+
+def objective(trial, data, models):
+    # Adaptive stat blending params
+    a = trial.suggest_float("a", -20.0, 5.0)
+    b = trial.suggest_float("b", -10.0, 5.0)
+    c_param = trial.suggest_float("c", -5.0, 5.0)
+
+    # Adaptive k params
+    k_base = trial.suggest_float("k_base", 50, 500)
+    k_low_thresh = trial.suggest_float("k_low_thresh", 0.02, 0.08)
+    k_low = trial.suggest_float("k_low", 10, 150)
+    k_mid_thresh = trial.suggest_float("k_mid_thresh", 0.08, 0.15)
+    k_mid = trial.suggest_float("k_mid", 30, 300)
+
+    adaptive_params = {"a": a, "b": b, "c": c_param}
+    k_params = {
+        "k_base": k_base,
+        "k_low_thresh": k_low_thresh, "k_low": k_low,
+        "k_mid_thresh": k_mid_thresh, "k_mid": k_mid,
+    }
+
+    round_scores = evaluate_config(data, models, adaptive_params, k_params)
+
+    for rn, s in round_scores.items():
+        trial.set_user_attr(f"R{rn}", s)
+
+    avg = np.mean(list(round_scores.values()))
+    return avg
+
+
+def main():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--n-trials", type=int, default=200)
+    args = parser.parse_args()
+
+    print("Precomputing...")
+    data = precompute()
+    print(f"Train: {data['train_X'].shape}")
+    print(f"Val rounds: {[rn for rn in VAL_ROUNDS_WITH_OBS if f'val_{rn}' in data]}")
+    print(f"Hist settle rate: {data['hist_stats'].settlement_rate:.3f}")
+
+    # Train CatBoost
+    print("\nTraining CatBoost...")
+    cat_params = json.load(open(Path(__file__).parent.parent / "best_params_all.json"))["catboost"]
+    X, y, w = data["train_X"], data["train_y"], data["train_w"]
+    models = []
+    for c in range(NUM_CLASSES):
+        t = y[:, c]
+        if t.max() - t.min() < 1e-8:
+            models.append(None)
+            continue
+        m = CatBoostRegressor(loss_function="RMSE", verbose=0, thread_count=-1, **cat_params)
+        m.fit(X, t, sample_weight=w)
+        models.append(m)
+
+    # Baseline: current approach (obs stats directly, fixed k thresholds)
+    print("\nBaseline (current approach):")
+    baseline_params = {"a": 0, "b": 0, "c": 10}  # sigmoid(10) ≈ 1.0 → pure obs stats
+    baseline_k = {"k_base": 361, "k_low_thresh": 0.05, "k_low": 50, "k_mid_thresh": 0.10, "k_mid": 100}
+    baseline_scores = evaluate_config(data, models, baseline_params, baseline_k)
+    for rn, s in sorted(baseline_scores.items()):
+        print(f"  R{rn}: {s:.2f}")
+    print(f"  Avg: {np.mean(list(baseline_scores.values())):.2f}")
+
+    # Optuna search
+    print(f"\nRunning Optuna ({args.n_trials} trials)...")
+    study = optuna.create_study(study_name="adaptive-stats", direction="maximize")
+    # Seed with baseline
+    study.enqueue_trial({"a": 0, "b": 0, "c": 10, "k_base": 361,
+                         "k_low_thresh": 0.05, "k_low": 50, "k_mid_thresh": 0.10, "k_mid": 100})
+    study.optimize(lambda t: objective(t, data, models), n_trials=args.n_trials)
+
+    best = study.best_trial
+    print(f"\n{'=' * 60}")
+    print(f"BEST: {best.value:.4f} (trial {best.number})")
+    print(f"{'=' * 60}")
+    for rn in sorted(VAL_ROUNDS_WITH_OBS):
+        key = f"R{rn}"
+        if key in best.user_attrs:
+            bl = baseline_scores.get(rn, 0)
+            diff = best.user_attrs[key] - bl
+            print(f"  R{rn}: {best.user_attrs[key]:.2f}  (baseline: {bl:.2f}, diff: {diff:+.2f})")
+    print(f"\n  Params: {best.params}")
+
+    # Interpret the learned function
+    a, b, c_p = best.params["a"], best.params["b"], best.params["c"]
+    print(f"\n  Adaptive weight function: sigmoid({a:.2f} * settle_rate + {b:.2f} * divergence + {c_p:.2f})")
+    for settle in [0.03, 0.10, 0.15, 0.20, 0.30]:
+        div = abs(settle - data["hist_stats"].settlement_rate) / (data["hist_stats"].settlement_rate + 1e-6)
+        w = sigmoid(a * settle + b * div + c_p)
+        print(f"    settle={settle:.2f} → obs_weight={w:.3f}")
+
+    # Save
+    result = {
+        "adaptive_stats": {"a": a, "b": b, "c": c_p},
+        "k_params": {
+            "k_base": best.params["k_base"],
+            "k_low_thresh": best.params["k_low_thresh"],
+            "k_low": best.params["k_low"],
+            "k_mid_thresh": best.params["k_mid_thresh"],
+            "k_mid": best.params["k_mid"],
+        },
+        "baseline_avg": float(np.mean(list(baseline_scores.values()))),
+        "optimized_avg": float(best.value),
+    }
+    out_path = Path(__file__).parent / "adaptive_stats_params.json"
+    with open(out_path, "w") as f:
+        json.dump(result, f, indent=2)
+    print(f"\n  Saved to {out_path}")
+
+
+if __name__ == "__main__":
+    main()
