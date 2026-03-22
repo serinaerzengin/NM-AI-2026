@@ -19,7 +19,16 @@ async def process_files(files: list) -> list:
         if lower.endswith(".csv"):
             try:
                 raw = base64.b64decode(content_b64).decode("utf-8", errors="replace")
-                reader = csv.reader(io.StringIO(raw))
+                # Auto-detect delimiter (Norwegian CSVs often use semicolons)
+                try:
+                    dialect = csv.Sniffer().sniff(raw[:4096], delimiters=',;\t')
+                    reader = csv.reader(io.StringIO(raw), dialect)
+                except csv.Error:
+                    # Fallback: try semicolon first (most common in Norway), then comma
+                    if ';' in raw[:1000]:
+                        reader = csv.reader(io.StringIO(raw), delimiter=';')
+                    else:
+                        reader = csv.reader(io.StringIO(raw))
                 rows = list(reader)
                 # Format as text table
                 if rows:

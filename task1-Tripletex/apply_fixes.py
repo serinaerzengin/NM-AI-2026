@@ -82,6 +82,11 @@ def apply_fixes(path: str, method: str, payload):
         payload.setdefault("orderDate", today)
         for line in payload.get("orderLines", []):
             line.pop("vatType", None)
+            line.pop("deliveryDate", None)  # doesn't exist on orderline
+            # Relocate project from orderLine to order body (doesn't exist on orderline)
+            line_project = line.pop("project", None)
+            if line_project and "project" not in payload:
+                payload["project"] = line_project
 
     # === PRODUCT FIXES ===
     if "/product" in path and method == "POST":
@@ -167,6 +172,15 @@ def apply_fixes(path: str, method: str, payload):
         voucher = payload.get("voucher")
         if isinstance(voucher, dict):
             voucher.pop("dueDate", None)
+            # Auto-inject supplier on leverandørgjeld (2400) postings — "Leverandør mangler"
+            supplier_ref = payload.get("supplier")
+            if supplier_ref and isinstance(voucher.get("postings"), list):
+                for posting in voucher["postings"]:
+                    if isinstance(posting, dict) and "supplier" not in posting:
+                        # Negative amountGross = credit side = leverandørgjeld
+                        amt = posting.get("amountGross", 0)
+                        if amt is not None and amt < 0:
+                            posting["supplier"] = supplier_ref
 
     # === TRAVEL EXPENSE COST FIXES ===
     if "/travelExpense/cost" in path and method == "POST":
@@ -206,8 +220,9 @@ async def ensure_bank_account(client):
             account = values[0]
             acc_id = account.get("id")
             if acc_id and not account.get("bankAccountNumber"):
-                account["bankAccountNumber"] = "12345678903"
-                put_result = await client.call("PUT", f"/ledger/account/{acc_id}", json_data=account)
+                # Send minimal payload — full object has read-only fields that may cause 422
+                minimal = {"id": acc_id, "number": account.get("number", 1920), "name": account.get("name", "Bank"), "bankAccountNumber": "12345678903"}
+                put_result = await client.call("PUT", f"/ledger/account/{acc_id}", json_data=minimal)
                 if put_result["status"] < 400:
                     print("[SETUP] Bank account registered on 1920", file=sys.stderr)
                     _bank_account_registered = True

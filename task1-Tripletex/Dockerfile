@@ -11,6 +11,7 @@ RUN pip install --no-cache-dir \
     openai-agents \
     openpyxl \
     pdfplumber \
+    pypdfium2 \
     google-cloud-storage
 
 COPY *.py ./

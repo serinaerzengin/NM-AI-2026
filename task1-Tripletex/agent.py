@@ -19,7 +19,7 @@ from agents import (
 )
 from agents.items import ModelResponse
 
-from apply_fixes import apply_fixes, ensure_bank_account, create_employment, auto_onboard_employee
+from apply_fixes import apply_fixes, ensure_bank_account, create_employment
 from system_prompt import build_system_prompt
 from tripletex_client import TripletexClient, ProxyTokenExpiredError
 
@@ -117,6 +117,7 @@ class TaskContext:
     turn_count: int = 0
     start_time: float = 0.0
     logger: RunLogger = field(default=None)
+    write_lock: asyncio.Lock = field(default_factory=asyncio.Lock)  # Serialize writes — Gemini ignores parallel_tool_calls=False
 
 
 # === Logging Hooks ===
@@ -180,15 +181,19 @@ _POSTING_FIELDS = ("id", "row", "account", "amountGross", "amountGrossCurrency",
                    "description", "vatType", "currency", "supplier", "customer")
 
 
-_SLIM_FIELDS = {
-    "salary/type": ("id", "number", "name"),
-    "travelExpense/costCategory": ("id", "name", "description", "amountNOK"),
-    "travelExpense/rateCategory": ("id", "name", "type", "amountDomestic"),
-    "travelExpense/paymentType": ("id", "description"),
-    "/customer": ("id", "name", "organizationNumber", "email", "isCustomer"),
-    "/supplier": ("id", "name", "organizationNumber", "email", "isSupplier"),
-    "/employee": ("id", "firstName", "lastName", "email", "dateOfBirth", "department", "companyId"),
-}
+# IMPORTANT: Order matters — more-specific patterns MUST come first
+# because matching uses `pattern in path` (substring match)
+_SLIM_FIELDS = [
+    ("salary/type", ("id", "number", "name")),
+    ("travelExpense/costCategory", ("id", "name", "description", "amountNOK")),
+    ("travelExpense/rateCategory", ("id", "name", "type", "amountDomestic")),
+    ("travelExpense/paymentType", ("id", "description")),
+    ("/supplierInvoice", ("id", "invoiceNumber", "amount", "amountOutstanding", "invoiceDate", "supplier")),
+    ("/employee", ("id", "firstName", "lastName", "email", "dateOfBirth", "department", "companyId")),
+    ("/invoice", ("id", "invoiceNumber", "amount", "amountOutstanding", "amountCurrency", "invoiceDate", "dueDate", "customer", "isCreditNote")),
+    ("/customer", ("id", "name", "organizationNumber", "email", "isCustomer")),
+    ("/supplier", ("id", "name", "organizationNumber", "email", "isSupplier")),
+]
 
 
 def _slim_values(values: list, path: str) -> list:
@@ -201,7 +206,7 @@ def _slim_values(values: list, path: str) -> list:
             for v in values
         ]
     # Slim large reference data responses to just the fields the LLM needs
-    for pattern, fields in _SLIM_FIELDS.items():
+    for pattern, fields in _SLIM_FIELDS:
         if pattern in path:
             return [{k: v.get(k) for k in fields if v.get(k) is not None} for v in values]
     return values
@@ -282,9 +287,13 @@ Args: path: API endpoint path. params: Query parameters as JSON string."""
             parsed_params = {}
         parsed_params = {**url_params, **parsed_params}
 
-    # Auto-inject fields param so account numbers/names are always returned
+    # Auto-inject params for better responses
     if parsed_params is None:
         parsed_params = {}
+    # Ensure reference data endpoints return ALL records (prevents pagination waste)
+    _REF_DATA_PATHS = ("/costCategory", "/rateCategory", "/paymentType", "/salary/type", "/voucherType", "/vatType")
+    if any(p in path for p in _REF_DATA_PATHS) and "count" not in parsed_params:
+        parsed_params["count"] = "1000"
     if "/ledger/posting" in path and "fields" not in parsed_params:
         parsed_params["fields"] = "id,date,description,account(id,number,name),amountGross,amountGrossCurrency,vatType(id),row,supplier(id,name),customer(id,name)"
     if "/balanceSheet" in path and "fields" not in parsed_params:
@@ -312,39 +321,135 @@ Args: path: API endpoint path. body: Request body as JSON string."""
     if isinstance(payload, (dict, list)):
         payload = apply_fixes(path, "POST", payload)
 
-    result = await client.call("POST", path, json_data=payload)
-    _invalidate_cache(ctx.context.get_cache, path)
+    # Serialize writes — Gemini ignores parallel_tool_calls=False
+    async with ctx.context.write_lock:
+        result = await client.call("POST", path, json_data=payload)
+        _invalidate_cache(ctx.context.get_cache, path)
 
-    if result["status"] >= 400:
-        error_msg = json.dumps(result.get("data", {}), ensure_ascii=False).lower()
-        log.log(f"  POST {path} -> {result['status']} ERR")
+        if result["status"] >= 400:
+            error_msg = json.dumps(result.get("data", {}), ensure_ascii=False).lower()
+            log.log(f"  POST {path} -> {result['status']} ERR")
 
-        if result["status"] == 422 and ("allerede" in error_msg or "i bruk" in error_msg or "already" in error_msg):
-            return f"Entity already exists. Use GET {path} to find it instead. Error: {_truncate_response(result, path=path)}"
+            if result["status"] == 422 and ("allerede" in error_msg or "i bruk" in error_msg or "already" in error_msg):
+                return f"Entity already exists. Use GET {path} to find it instead. Error: {_truncate_response(result, path=path)}"
 
-        if "ugyldig mva-kode" in error_msg or "vattype" in error_msg:
-            return f"Invalid VAT type ID. Query GET /ledger/vatType to find correct IDs. Error: {_truncate_response(result, path=path)}"
-
-        if "arbeidsforhold" in error_msg and "/salary" in path:
-            emp_id = _extract_employee_id(payload) if isinstance(payload, dict) else None
-            if emp_id:
-                # Use the salary period's first day as employment start (not TODAY)
-                year = payload.get("year", 2026)
-                month = payload.get("month", 1)
-                salary_start = f"{year}-{month:02d}-01"
-                log.log(f"  AUTO: creating employment for employee {emp_id} from {salary_start}")
-                await create_employment(client, emp_id, start_date=salary_start)
-                result = await client.call("POST", path, json_data=payload)
-                if result["status"] < 400:
-                    log.log(f"  AUTO: salary retry succeeded")
-                    return f"SUCCESS: Salary transaction created. {_truncate_response(result)}"
+            if "department" in error_msg and "fylles ut" in error_msg and path.rstrip("/") == "/employee":
+                # Auto-fix: fetch a department and inject it
+                dept_result = await client.call("GET", "/department", params={"count": "1"})
+                dept_values = dept_result.get("data", {}).get("values", [])
+                dept_id = None
+                if dept_values:
+                    dept_id = dept_values[0].get("id")
                 else:
-                    log.log(f"  AUTO: salary retry FAILED ({result['status']})")
-                    return f"Salary POST failed even after auto-creating employment (startDate={salary_start}). The employment may need a different startDate. RETRY the POST /salary/transaction call. Error: {_truncate_response(result, path=path)}"
+                    create_dept = await client.call("POST", "/department", json_data={"name": "Generell", "departmentNumber": "1"})
+                    if create_dept["status"] < 400:
+                        dept_id = create_dept.get("data", {}).get("value", {}).get("id")
+                if dept_id and isinstance(payload, dict):
+                    payload["department"] = {"id": dept_id}
+                    log.log(f"  AUTO: injected department {dept_id}, retrying")
+                    result = await client.call("POST", path, json_data=payload)
+                    if result["status"] < 400:
+                        return _truncate_response(result)
 
-        if "bankkontonummer" in error_msg or "bank account" in error_msg.lower():
-            await ensure_bank_account(client)
-            return f"Bank account registered. Please retry. Error: {_truncate_response(result)}"
+            if "ugyldig mva-kode" in error_msg or "låst til mva-kode" in error_msg or ("vattype" in error_msg and "låst" in error_msg):
+                # Auto-fix: strip vatType from payload AND postings, then retry
+                if isinstance(payload, dict):
+                    payload.pop("vatType", None)  # product-level vatType
+                    for p in payload.get("postings", []):
+                        if isinstance(p, dict):
+                            p.pop("vatType", None)
+                    voucher = payload.get("voucher")
+                    if isinstance(voucher, dict):
+                        for p in voucher.get("postings", []):
+                            if isinstance(p, dict):
+                                p.pop("vatType", None)
+                    log.log(f"  AUTO: stripped vatType, retrying")
+                    result = await client.call("POST", path, json_data=payload)
+                    if result["status"] < 400:
+                        return _truncate_response(result)
+                return f"VAT type error. OMIT vatType and retry. Error: {_truncate_response(result, path=path)}"
+
+            if "arbeidsforhold" in error_msg and "/salary" in path:
+                emp_id = _extract_employee_id(payload) if isinstance(payload, dict) else None
+                if emp_id:
+                    year = payload.get("year", 2026)
+                    month = payload.get("month", 1)
+                    salary_start = f"{year}-{month:02d}-01"
+                    log.log(f"  AUTO: creating employment for employee {emp_id} from {salary_start}")
+                    await create_employment(client, emp_id, start_date=salary_start)
+                    result = await client.call("POST", path, json_data=payload)
+                    if result["status"] < 400:
+                        log.log(f"  AUTO: salary retry succeeded")
+                        return f"SUCCESS: Salary transaction created. {_truncate_response(result)}"
+                    else:
+                        log.log(f"  AUTO: salary retry FAILED ({result['status']})")
+                        return f"Salary POST failed even after auto-creating employment (startDate={salary_start}). The employment may need a different startDate. RETRY the POST /salary/transaction call. Error: {_truncate_response(result, path=path)}"
+
+            if "leverandør mangler" in error_msg:
+                # Auto-fix: find supplier ID in the payload and inject into postings
+                if isinstance(payload, dict):
+                    # Try to find supplier from supplierInvoice parent or from postings that have it
+                    supplier_ref = payload.get("supplier")
+                    if not supplier_ref:
+                        voucher = payload.get("voucher", {})
+                        for p in voucher.get("postings", []) if isinstance(voucher, dict) else []:
+                            if isinstance(p, dict) and p.get("supplier"):
+                                supplier_ref = p["supplier"]
+                                break
+                    if supplier_ref:
+                        for p in payload.get("postings", []):
+                            if isinstance(p, dict) and "supplier" not in p and p.get("amountGross", 0) < 0:
+                                p["supplier"] = supplier_ref
+                        voucher = payload.get("voucher")
+                        if isinstance(voucher, dict):
+                            for p in voucher.get("postings", []):
+                                if isinstance(p, dict) and "supplier" not in p and p.get("amountGross", 0) < 0:
+                                    p["supplier"] = supplier_ref
+                        log.log(f"  AUTO: injected supplier into postings, retrying")
+                        result = await client.call("POST", path, json_data=payload)
+                        if result["status"] < 400:
+                            return _truncate_response(result)
+
+            # Auto-fix "Feltet eksisterer ikke" — strip the unknown field and retry
+            if "feltet eksisterer ikke" in error_msg and isinstance(payload, (dict, list)):
+                bad_field = None
+                for vm in result.get("data", {}).get("validationMessages", []):
+                    if "eksisterer ikke" in (vm.get("message", "") or "").lower():
+                        bad_field = vm.get("field")
+                        break
+                if bad_field and isinstance(payload, dict):
+                    removed = False
+                    if bad_field in payload:
+                        payload.pop(bad_field)
+                        removed = True
+                    # Also check nested voucher
+                    voucher = payload.get("voucher")
+                    if isinstance(voucher, dict) and bad_field in voucher:
+                        voucher.pop(bad_field)
+                        removed = True
+                    # Check postings
+                    for p in payload.get("postings", []):
+                        if isinstance(p, dict) and bad_field in p:
+                            p.pop(bad_field)
+                            removed = True
+                    for p in (payload.get("voucher", {}) or {}).get("postings", []):
+                        if isinstance(p, dict) and bad_field in p:
+                            p.pop(bad_field)
+                            removed = True
+                    # Check orderLines
+                    for ol in payload.get("orderLines", []):
+                        if isinstance(ol, dict) and bad_field in ol:
+                            ol.pop(bad_field)
+                            removed = True
+                    if removed:
+                        log.log(f"  AUTO: stripped field '{bad_field}', retrying")
+                        result = await client.call("POST", path, json_data=payload)
+                        if result["status"] < 400:
+                            return _truncate_response(result)
+
+            if "bankkontonummer" in error_msg or "bank account" in error_msg.lower():
+                await ensure_bank_account(client)
+                return f"Bank account registered. Please retry. Error: {_truncate_response(result)}"
 
     return _truncate_response(result)
 
@@ -385,14 +490,36 @@ Args: path: API endpoint path. body: JSON string. params: Query parameters as JS
     if "/:invoice" in path or "/:payment" in path:
         await ensure_bank_account(client)
 
-    result = await client.call("PUT", path, json_data=payload, params=parsed_params)
-    _invalidate_cache(ctx.context.get_cache, path)
+    # Serialize writes — Gemini ignores parallel_tool_calls=False
+    async with ctx.context.write_lock:
+        result = await client.call("PUT", path, json_data=payload, params=parsed_params)
+        _invalidate_cache(ctx.context.get_cache, path)
 
-    if result["status"] >= 400:
-        error_msg = json.dumps(result.get("data", {}), ensure_ascii=False).lower()
-        if "bankkontonummer" in error_msg or "bank account" in error_msg:
-            await ensure_bank_account(client)
-            result = await client.call("PUT", path, json_data=payload, params=parsed_params)
+        if result["status"] >= 400:
+            error_msg = json.dumps(result.get("data", {}), ensure_ascii=False).lower()
+
+            # Auto-fix vatType errors on PUT
+            if "ugyldig mva-kode" in error_msg or "låst til mva-kode" in error_msg:
+                if payload and isinstance(payload, dict):
+                    payload.pop("vatType", None)
+                    for p in payload.get("postings", []):
+                        if isinstance(p, dict):
+                            p.pop("vatType", None)
+                    result = await client.call("PUT", path, json_data=payload, params=parsed_params)
+                    error_msg = json.dumps(result.get("data", {}), ensure_ascii=False).lower()
+
+            # Auto-fix "Feltet eksisterer ikke" on PUT
+            if result["status"] == 422 and "feltet eksisterer ikke" in error_msg and payload and isinstance(payload, dict):
+                for vm in result.get("data", {}).get("validationMessages", []):
+                    bf = vm.get("field")
+                    if bf and "eksisterer ikke" in (vm.get("message", "") or "").lower() and bf in payload:
+                        payload.pop(bf)
+                result = await client.call("PUT", path, json_data=payload, params=parsed_params)
+                error_msg = json.dumps(result.get("data", {}), ensure_ascii=False).lower()
+
+            if "bankkontonummer" in error_msg or "bank account" in error_msg:
+                await ensure_bank_account(client)
+                result = await client.call("PUT", path, json_data=payload, params=parsed_params)
 
     response = _truncate_response(result)
     return response
@@ -402,8 +529,9 @@ Args: path: API endpoint path. body: JSON string. params: Query parameters as JS
 async def tripletex_delete(ctx: RunContextWrapper[TaskContext], path: str) -> str:
     """DELETE from Tripletex API. Args: path: API path with ID, e.g. /travelExpense/123."""
     client = ctx.context.client
-    result = await client.call("DELETE", path)
-    ctx.context.get_cache.clear()
+    async with ctx.context.write_lock:
+        result = await client.call("DELETE", path)
+        ctx.context.get_cache.clear()
     return _truncate_response(result)
 
 
@@ -443,23 +571,23 @@ def dynamic_instructions(ctx: RunContextWrapper[TaskContext], agent: Agent) -> s
     turns = c.turn_count
 
     additions = []
-    if elapsed > 180:
-        additions.append(f"\n\nCRITICAL: {elapsed:.0f}s elapsed of 240s budget. STOP THINKING. Execute NOW with what you have.")
+    if elapsed > 200:
+        additions.append(f"\n\nCRITICAL: {elapsed:.0f}s elapsed of 280s budget. STOP researching. Execute your writes NOW or you will time out and score 0.")
     elif elapsed > 120:
-        additions.append(f"\n\nWARNING: {elapsed:.0f}s elapsed of 240s budget. Act NOW — post vouchers, register payments.")
+        additions.append(f"\n\nURGENT: {elapsed:.0f}s elapsed of 280s budget. You MUST start writing (POST/PUT) immediately. Do NOT fetch more data.")
     elif elapsed > 60:
-        additions.append(f"\n\nNOTE: {elapsed:.0f}s elapsed. Be efficient — act on the data you have.")
+        additions.append(f"\n\nNOTE: {elapsed:.0f}s elapsed. Act on the data you already have — do not over-research.")
 
-    if errors > 1 and turns > 3:
-        additions.append(f"\n\nWARNING: {errors} errors after {turns} turns. Change strategy NOW. Do not retry the same failing approach.")
+    if errors > 2:
+        additions.append(f"\n\nWARNING: {errors} errors. Change strategy NOW. Do not retry the same failing approach.")
 
-    if calls > 20:
-        additions.append(f"\n\nWARNING: {calls} API calls. Wrap up.")
+    if calls > 18:
+        additions.append(f"\n\nWARNING: {calls} API calls. Wrap up — efficiency score drops with more calls.")
 
-    if turns > 15:
+    if turns > 12:
         additions.append(f"\n\nCRITICAL: {turns} turns used. STOP exploring. Finish NOW with what you have.")
-    elif turns > 8:
-        additions.append(f"\n\nNOTE: {turns} turns. If lookups keep failing, SKIP them and proceed.")
+    elif turns > 6:
+        additions.append(f"\n\nNOTE: {turns} turns used. Finish what you have. If a lookup failed, skip it and proceed.")
 
     if additions:
         return base + "".join(additions)
@@ -475,7 +603,7 @@ def create_agent() -> Agent[TaskContext]:
     gemini_client = AsyncOpenAI(
         api_key=api_key,
         base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
-        timeout=90.0,  # 90s max per LLM call
+        timeout=120.0,  # 120s max per LLM call
     )
 
     model = OpenAIChatCompletionsModel(
@@ -487,13 +615,10 @@ def create_agent() -> Agent[TaskContext]:
         name="TripletexAccountant",
         instructions=dynamic_instructions,
         model=model,
-        tools=[tripletex_get, tripletex_post, tripletex_put, tripletex_delete],
+        tools=[tripletex_get, tripletex_post, tripletex_put, tripletex_delete, lookup_occupation_code],
         model_settings=ModelSettings(
-            temperature=0.1,
+            temperature=0.0,
             parallel_tool_calls=False,
-            reasoning={
-                "effort": "high",
-            },
         ),
     )
 
@@ -518,16 +643,20 @@ async def run_agent(prompt: str, file_contents: list, tripletex_client: Triplete
     # Set up bank account proactively only for tasks that need invoices/payments
     # Skip for simple tasks (create product/customer/supplier/employee/department) to save 1 write call
     prompt_lower = prompt.lower()
+    # Bank account is ONLY needed for tasks that create CUSTOMER INVOICES
+    # (PUT /order/:invoice or PUT /invoice/:payment). NOT needed for vouchers,
+    # salary, travel, supplier invoices, monthly closing, receipts.
+    # Reactive handler in tripletex_put catches edge cases.
     needs_bank = any(w in prompt_lower for w in [
         "faktura", "invoice", "factura", "rechnung", "fatura", "facture",
-        "betaling", "payment", "paiement", "pago", "pagamento", "zahlung",
-        "lønn", "salary", "payroll", "paie", "nómina",
-        "avstem", "reconcil", "kontoauszug",
-        "reise", "travel", "viaje", "déplacement",
-        "agio", "disagio", "valuta", "currency", "taux", "kurs",
-        "bilag", "voucher", "bokfør", "bokför",
-        "closing", "clôture", "cierre", "oppgjør", "oppgjer",
-        "kvittering", "reçu", "receipt", "recibo",
+        "ordre", "order", "auftrag", "commande", "pedido", "bestilling",
+        "betaling", "payment", "paiement", "pago", "zahlung",
+        "purregebyr", "rappel", "mahngebühr", "lembrete", "overdue", "forfalt", "überfällig", "vencid",
+        "credit note", "kreditnota", "gutschrift",
+        "agio", "disagio", "valuta", "currency", "kurs", "wechselkurs", "câmbio",
+        "avstem", "reconcil", "kontoauszug", "extrato", "rapproch",
+        "syklus", "lifecycle", "ciclo de vida", "cycle de vie", "lebenszyklus",
+        "fastpris", "fixed price", "prix forfaitaire", "precio fijo", "preço fixo",
     ])
     if needs_bank:
         try:
@@ -554,10 +683,10 @@ async def run_agent(prompt: str, file_contents: list, tripletex_client: Triplete
                 starting_agent=agent,
                 input=input_content,
                 context=task_ctx,
-                max_turns=30,
+                max_turns=25,
                 hooks=hooks or LoggingHooks(),
             ),
-            timeout=240.0,  # Hard timeout: 4 minutes
+            timeout=280.0,  # Hard timeout: ~5 min (competition allows 300s)
         )
         elapsed = time.time() - start_time
         logger.log(f"DONE in {elapsed:.1f}s: {str(run_result.final_output)[:300]}")
