@@ -209,6 +209,10 @@ __marimo__/
 raw/
 processed/
 .DS_Store
+task2-AstarIsland/CLAUDE.md
+.claude/settings.local.json
+task2-AstarIsland/data/*
+catboost_info/
 
 # Task 3 data — track raw data + product crops, ignore generated/processed
 task3-NorgesGruppen/data/*
@@ -231,6 +235,15 @@ task3-NorgesGruppen/data/processed/product_crops_raw/*
 !task3-NorgesGruppen/data/processed/product_crops_raw/.gitkeep
 !task3-NorgesGruppen/data/processed/product_crops_raw/*.jpg
 !task3-NorgesGruppen/data/processed/product_crops_raw/manifest.json
+task3-NorgesGruppen/outputs_dinov2_detr/*
+
+# Task 3 models & submissions
+task3-NorgesGruppen/*.onnx
+task3-NorgesGruppen/*.pt
+task3-NorgesGruppen/*.zip
+task3-NorgesGruppen/models/
+task3-NorgesGruppen/submission/*.onnx
+task3-NorgesGruppen/.venv*/
 
 # Task 3 results & logs — keep dirs, ignore outputs
 task3-NorgesGruppen/results/*
