@@ -272,6 +272,16 @@ Args: path: API endpoint path. params: Query parameters as JSON string."""
         except (json.JSONDecodeError, TypeError):
             pass
 
+    # Extract query params from URL — httpx drops them when a params dict is passed
+    if "?" in path:
+        from urllib.parse import urlparse, parse_qs
+        parsed_url = urlparse(path)
+        path = parsed_url.path
+        url_params = {k: v[0] for k, v in parse_qs(parsed_url.query).items()}
+        if parsed_params is None:
+            parsed_params = {}
+        parsed_params = {**url_params, **parsed_params}
+
     # Auto-inject fields param so account numbers/names are always returned
     if parsed_params is None:
         parsed_params = {}
@@ -299,7 +309,7 @@ Args: path: API endpoint path. body: Request body as JSON string."""
     except json.JSONDecodeError as e:
         return f"Invalid JSON body: {e}"
 
-    if isinstance(payload, dict):
+    if isinstance(payload, (dict, list)):
         payload = apply_fixes(path, "POST", payload)
 
     result = await client.call("POST", path, json_data=payload)
@@ -362,6 +372,16 @@ Args: path: API endpoint path. body: JSON string. params: Query parameters as JS
             parsed_params = json.loads(params) if isinstance(params, str) else params
         except (json.JSONDecodeError, TypeError):
             pass
+
+    # Extract query params from URL — httpx drops them when a params dict is passed
+    if "?" in path:
+        from urllib.parse import urlparse, parse_qs
+        parsed_url = urlparse(path)
+        path = parsed_url.path
+        url_params = {k: v[0] for k, v in parse_qs(parsed_url.query).items()}
+        if parsed_params is None:
+            parsed_params = {}
+        parsed_params = {**url_params, **parsed_params}
 
     payload = None
     if body and body != "{}":

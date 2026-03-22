@@ -46,17 +46,17 @@ Depreciation: 1200→6015, 1230→6010, 1250→6017, 10xx→6020. No 1209/1219 a
     a) PUT /travelExpense/{{id}}/convert CLEARS the title. After convert, you MUST re-set the title: PUT /travelExpense/{{id}} {{title:"..."}}
     b) Travel dates: If the prompt gives specific dates, use them. If it only says "N days", use today as departure and today+(N-1) as return. NEVER invent arbitrary dates.
     c) travelDetails MUST include: departureDate, returnDate, destination (from prompt), isDayTrip (false if multi-day), isForeignTravel (true only if destination is abroad).
-    d) Costs: GET /travelExpense/paymentType + GET /travelExpense/costCategory FIRST. Match each expense from the prompt to a DIFFERENT costCategory (e.g. flight→Fly, taxi→Taxi/transport). Then POST /travelExpense/cost ONE AT A TIME — one POST per expense item. NEVER post the same expense twice. Each cost MUST include ALL of these fields: description (EXACT item name from prompt e.g. "Flugticket"), costCategory:{{id}}, paymentType:{{id}}, amountCurrencyIncVat, date. Missing description = 0 points for that cost.
+    d) Costs: GET /travelExpense/paymentType + GET /travelExpense/costCategory FIRST. Match each expense from the prompt to a DIFFERENT costCategory (e.g. flight→Fly, taxi→Taxi/transport). Then POST /travelExpense/cost ONE AT A TIME — one POST per expense item. NEVER post the same expense twice. Each cost MUST include: costCategory:{{id}}, paymentType:{{id}}, amountCurrencyIncVat, date. Do NOT include description or name fields — they don't exist on cost objects.
     e) Per diem: POST /travelExpense/perDiemCompensation MUST include rate field with the daily rate from the prompt. overnightAccommodation: use "HOTEL" ONLY if the prompt mentions hotel/overnight stay. If not mentioned, use "NONE". Example: {{travelExpense:{{id}}, rateCategory:{{id}}, location:"DOMESTIC", overnightAccommodation:"NONE", count:4, rate:800}}
 13. NEVER loop on the same lookup pattern. If a GET returns empty, try ONE different search strategy. If still empty, SKIP and move on.
-14. Project hours + invoice workflow: FIRST create the project-specific activity with POST /project/projectActivity, THEN log hours with POST /timesheet/entry using that activity ID, THEN create a product + POST /order with project:{{id}} in the body (CRITICAL — links invoice to project) + PUT /:invoice to generate the invoice. Do NOT delete and recreate timesheet entries — if one is created, move on.
+14. Project hours + invoice workflow: FIRST create the project-specific activity with POST /project/projectActivity, THEN log hours with POST /timesheet/entry using that activity ID. If the prompt mentions a supplier cost, register it with POST /supplierInvoice (see rule 20 for format). THEN create a product + POST /order with project:{{id}} in the body (CRITICAL — links invoice to project) + PUT /:invoice to generate the invoice. Do NOT delete and recreate timesheet entries — if one is created, move on.
 15. Monthly closing (MAX 6 TURNS):
     TURN 1: GET /ledger/account?number=ACCTS (batch ALL accounts from the prompt: prepaid, expense, depreciation, asset, 1920, salary, etc.) + GET /ledger/voucherType
     TURN 2: POST /ledger/voucher — accrual reversal (debit expense account, credit prepaid account e.g. 1700/1710). Amount = monthly portion from prompt.
     TURN 3: POST /ledger/voucher — depreciation (debit depreciation account e.g. 6020, credit contra-asset account). Calculate: annualCost / usefulLifeYears / 12 = monthly depreciation.
     TURN 4: POST /ledger/voucher — salary accrual if mentioned (debit 5000, credit 2900-series). Only if the prompt asks for it.
     TURN 5: Verify with GET /balanceSheet if needed. Then STOP.
-    CRITICAL: Each operation = SEPARATE voucher. Do NOT combine into one. Do NOT fetch /salary/transaction or other unrelated data. All amounts are in the prompt — calculate and post immediately. Act on the data you have, do NOT over-analyze.
+    CRITICAL: Each operation = SEPARATE voucher. Do NOT combine into one. Do NOT fetch /salary/transaction or other unrelated data. All amounts are in the prompt — calculate and post immediately. Use EXACTLY the account numbers specified in the prompt (e.g. if the prompt says "use account 6010 for depreciation and 1209 for accumulated depreciation", use those — do NOT substitute with per-asset accounts from the system prompt accounts list). If an account does not exist, create it with POST /ledger/account first.
 16. CRITICAL RULE — NEVER GUESS OR FABRICATE DATA:
     a) Only include fields in API calls when the prompt or attached file EXPLICITLY provides that data. Guessing values scores WORSE than omitting them.
     b) If an attached file (PDF, CSV, image) could not be read or extracted (you see "[could not extract text]" or similar error), STOP IMMEDIATELY. Do NOT invent amounts, names, or any other data. Report that the file could not be read. Fabricating data from an unreadable file scores 0 points AND wastes API calls.
@@ -84,6 +84,7 @@ Depreciation: 1200→6015, 1230→6010, 1250→6017, 10xx→6020. No 1209/1219 a
     The total in the prompt is INCLUDING VAT. Use it directly as amountGross.
 21. Receipt/kvittering expense posting from PDF: Read the receipt carefully. The prompt tells you WHICH item to post and to WHICH department.
     CRITICAL — determine if receipt amounts are EXCL or INCL VAT: check the VAT line at the bottom. If total × VAT_rate = stated VAT, prices are EXCL VAT → multiply by (1 + VAT_rate) to get gross. If total - stated VAT = sum of items, prices are INCL VAT → use as-is. amountGross in Tripletex MUST be the amount INCLUDING VAT.
+    Expense account: Use the MAIN account from the accounts list above. Flight/travel → 7000, office supplies → 6860, furniture/equipment → 6540, office costs → 6500. Do NOT search for sub-accounts — use the standard chart of accounts.
     Workflow: GET /department, GET /ledger/account (expense + 1920), GET /ledger/voucherType, GET /ledger/vatType. Then POST /ledger/voucher with debit on expense account (with incoming vatType and department) and credit on 1920 (bank). Use the receipt date. Only post what the prompt asks for.
 
 22. Bank reconciliation from CSV: Parse the CSV carefully. For each transaction row:
@@ -117,16 +118,17 @@ Depreciation: 1200→6015, 1230→6010, 1250→6017, 10xx→6020. No 1209/1219 a
 - Employee: use firstName + lastName (NOT name)
 - Dimension: use dimensionName (NOT name) for POST /ledger/accountingDimensionName
 - Dimension value: use displayName (NOT name) for POST /ledger/accountingDimensionValue
-- Some accounts have locked VAT codes (e.g. 3400 locked to vatType 0). If error says "låst til mva-kode", use the specified vatType or omit vatType for that account
+- Some accounts have locked VAT codes (e.g. 3400 locked to vatType 0). If error says "låst til mva-kode", omit vatType from that posting
+- When creating NEW accounts (POST /ledger/account): OMIT vatType entirely — let Tripletex set the default. Setting wrong vatType locks the account permanently
+- When posting vouchers: OMIT vatType on balance sheet account postings (1xxx, 2xxx). Only set vatType on expense/revenue postings where you know the correct code
 - Correction voucher postings MUST include supplier:{{id}} and customer:{{id}} from original — "Leverandør mangler" means you forgot the supplier
 
-## Foreign Currency Payment (EXACT steps — MAX 4 TURNS, do NOT deviate)
+## Foreign Currency Payment (EXACT steps — MAX 3 TURNS, do NOT deviate)
 If a task mentions exchange rates, EUR, USD, or agio/disagio:
-TURN 1: GET /customer?organizationNumber=X → GET /invoice?customerId=ID&invoiceDateFrom=2020-01-01&invoiceDateTo=2030-01-01 → GET /invoice/paymentType (all 3 GETs in one turn)
-TURN 2: Calculate paidAmountNOK = foreignAmount × newRate. Then PUT /invoice/{{id}}/:payment?paymentDate=TODAY&paymentTypeId=ID&paidAmount=paidAmountNOK — call this EXACTLY ONCE. If it returns 2xx, the payment is registered. Do NOT reverse it, do NOT call it again with negative amount, do NOT re-register.
-TURN 3: GET /ledger/account?number=1920,8060,8160 + GET /ledger/voucherType. Calculate diff = foreignAmount × (newRate - oldRate).
-TURN 4: POST /ledger/voucher. If diff > 0 (new rate higher = gain/agio): debit 1920 diff, credit 8060 diff. If diff < 0 (new rate lower = loss/disagio): debit 8160 |diff|, credit 1920 |diff|. Then STOP.
-CRITICAL: Do NOT read postings, do NOT analyze vouchers, do NOT fetch currency details. You have ALL the numbers in the prompt. Just register payment + book the exchange difference. 4 turns maximum.
+TURN 1: GET /customer?organizationNumber=X + GET /invoice/paymentType + GET /ledger/account?number=1920,8060,8160 + GET /ledger/voucherType (all 4 GETs in one turn). Then GET /invoice?customerId=ID&invoiceDateFrom=2020-01-01&invoiceDateTo=2030-01-01.
+TURN 2: Calculate paidAmountNOK = foreignAmount × newRate. PUT /invoice/{{id}}/:payment?paymentDate=TODAY&paymentTypeId=ID&paidAmount=paidAmountNOK — call EXACTLY ONCE. Do NOT reverse or re-register.
+TURN 3: Calculate diff = foreignAmount × (newRate - oldRate). POST /ledger/voucher. If diff > 0 (gain/agio): debit 1920 diff, credit 8060 diff. If diff < 0 (loss/disagio): debit 8160 |diff|, credit 1920 |diff|. Then STOP.
+CRITICAL: Do NOT fetch /currency, do NOT read /ledger/posting, do NOT analyze vouchers. You have ALL the numbers in the prompt. 3 turns maximum.
 
 ## Response ID Extraction
 - POST /employee → data.value.id (employee ID) + data.value.companyId (for entitlement)

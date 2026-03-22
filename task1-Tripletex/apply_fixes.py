@@ -29,7 +29,27 @@ def _valid_norwegian_nin(nin: str) -> bool:
 _bank_account_registered = False
 
 
-def apply_fixes(path: str, method: str, payload) -> dict:
+def _strip_vattype_from_bs_accounts(payload):
+    """Strip vatType from balance sheet / financial account creation.
+    These accounts (1xxx, 2xxx, 8xxx) should not have vatType locked on creation."""
+    items = payload if isinstance(payload, list) else [payload]
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        num = item.get("number")
+        if num is not None:
+            num_str = str(num)
+            if num_str and num_str[0] in ("1", "2", "8"):
+                item.pop("vatType", None)
+
+
+def apply_fixes(path: str, method: str, payload):
+    # Handle list payloads (e.g. /ledger/account/list)
+    if isinstance(payload, list):
+        if "/ledger/account" in path and method == "POST":
+            _strip_vattype_from_bs_accounts(payload)
+        return payload
+
     if payload is None or not isinstance(payload, dict):
         return payload
 
@@ -105,6 +125,10 @@ def apply_fixes(path: str, method: str, payload) -> dict:
         else:
             payload.setdefault("activityType", "PROJECT_GENERAL_ACTIVITY")
 
+    # === ACCOUNT FIXES ===
+    if "/ledger/account" in path and method == "POST":
+        _strip_vattype_from_bs_accounts(payload)
+
     # === PROJECT FIXES ===
     if path.rstrip("/") == "/project" and method == "POST":
         payload.setdefault("startDate", TODAY)
@@ -130,6 +154,10 @@ def apply_fixes(path: str, method: str, payload) -> dict:
             payload.setdefault("workingHoursScheme", "NOT_SHIFT")
         # occupationCode is allowed — the GET endpoint works in competition
 
+    # === SUPPLIER FIXES ===
+    if path.rstrip("/") == "/supplier" and method == "POST":
+        payload.pop("bankAccountNumber", None)  # doesn't exist on supplier object
+
     # === SUPPLIER INVOICE FIXES ===
     if "/supplierInvoice" in path and method == "POST":
         payload.pop("dueDate", None)  # dueDate doesn't exist on supplierInvoice
@@ -140,9 +168,9 @@ def apply_fixes(path: str, method: str, payload) -> dict:
         amt = payload.pop("amount", None)
         if amt is not None and "amountCurrencyIncVat" not in payload:
             payload["amountCurrencyIncVat"] = amt
-        # Normalize description field name (competition scores this)
-        if "name" in payload and "description" not in payload:
-            payload["description"] = payload.pop("name")
+        # description field does NOT exist on cost objects — strip to avoid 422
+        payload.pop("description", None)
+        payload.pop("name", None)
 
     # === TRAVEL EXPENSE PER DIEM FIXES ===
     if "/travelExpense/perDiemCompensation" in path and method == "POST":
