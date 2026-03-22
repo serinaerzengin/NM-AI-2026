@@ -19,7 +19,7 @@ from agents import (
 )
 from agents.items import ModelResponse
 
-from apply_fixes import apply_fixes, ensure_bank_account, create_employment
+from apply_fixes import apply_fixes, ensure_bank_account, create_employment, auto_onboard_employee
 from system_prompt import build_system_prompt
 from tripletex_client import TripletexClient, ProxyTokenExpiredError
 
@@ -30,6 +30,39 @@ set_tracing_disabled(True)
 # Suppress noisy httpx/openai INFO logs
 logging.getLogger("httpx").setLevel(logging.WARNING)
 logging.getLogger("openai").setLevel(logging.WARNING)
+
+# === STYRK occupation code lookup (static, since Tripletex endpoint is [BETA]/403) ===
+
+_styrk_codes: dict[str, str] | None = None
+
+
+def _load_styrk_codes() -> dict[str, str]:
+    global _styrk_codes
+    if _styrk_codes is None:
+        path = os.path.join(os.path.dirname(__file__), "styrk_codes.json")
+        with open(path) as f:
+            _styrk_codes = json.load(f)
+    return _styrk_codes
+
+
+def styrk_lookup(query: str) -> list[dict]:
+    """Search STYRK-08 codes by code number or Norwegian name. Returns top matches."""
+    codes = _load_styrk_codes()
+    query_lower = query.lower()
+    results = []
+    # Exact code match
+    if query in codes:
+        results.append({"code": query, "name": codes[query]})
+    # Partial code or name match
+    for code, name in codes.items():
+        if code == query:
+            continue
+        if query_lower in name.lower() or query_lower in code:
+            results.append({"code": code, "name": name})
+        if len(results) >= 10:
+            break
+    return results
+
 
 # === Skills: load on-demand guidance from markdown files ===
 
@@ -147,6 +180,17 @@ _POSTING_FIELDS = ("id", "row", "account", "amountGross", "amountGrossCurrency",
                    "description", "vatType", "currency", "supplier", "customer")
 
 
+_SLIM_FIELDS = {
+    "salary/type": ("id", "number", "name"),
+    "travelExpense/costCategory": ("id", "name", "description", "amountNOK"),
+    "travelExpense/rateCategory": ("id", "name", "type", "amountDomestic"),
+    "travelExpense/paymentType": ("id", "description"),
+    "/customer": ("id", "name", "organizationNumber", "email", "isCustomer"),
+    "/supplier": ("id", "name", "organizationNumber", "email", "isSupplier"),
+    "/employee": ("id", "firstName", "lastName", "email", "dateOfBirth", "department", "companyId"),
+}
+
+
 def _slim_values(values: list, path: str) -> list:
     if "/ledger/account" in path:
         return [_slim_account(v) for v in values]
@@ -156,10 +200,14 @@ def _slim_values(values: list, path: str) -> list:
              for k in _POSTING_FIELDS if k in v}
             for v in values
         ]
+    # Slim large reference data responses to just the fields the LLM needs
+    for pattern, fields in _SLIM_FIELDS.items():
+        if pattern in path:
+            return [{k: v.get(k) for k in fields if v.get(k) is not None} for v in values]
     return values
 
 
-def _truncate_response(data, max_chars=6000, max_items=50, path="") -> str:
+def _truncate_response(data, path="") -> str:
     if isinstance(data, dict):
         inner = data.get("data", data)
         if isinstance(inner, dict):
@@ -173,10 +221,7 @@ def _truncate_response(data, max_chars=6000, max_items=50, path="") -> str:
                 else:
                     full_size = inner.get("fullResultSize", len(values))
                     inner["values"] = _slim_values(values, path)
-                    if len(inner["values"]) > max_items:
-                        inner["values"] = inner["values"][:max_items]
-                        inner["_truncated"] = f"Showing {max_items} of {full_size} total. Use from=N&count=N params to paginate."
-                    elif full_size > len(values):
+                    if full_size > len(values):
                         inner["_note"] = f"Showing {len(values)} of {full_size} total. Use from=N&count=N for more."
                 if "data" in data:
                     data = dict(data)
@@ -194,10 +239,7 @@ def _truncate_response(data, max_chars=6000, max_items=50, path="") -> str:
                 else:
                     data = inner
 
-    text = json.dumps(data, ensure_ascii=False, default=str)
-    if len(text) > max_chars:
-        text = text[:max_chars] + "... [truncated]"
-    return text
+    return json.dumps(data, ensure_ascii=False, default=str)
 
 
 def _extract_employee_id(payload) -> int | None:
@@ -229,7 +271,16 @@ Args: path: API endpoint path. params: Query parameters as JSON string."""
             parsed_params = json.loads(params) if isinstance(params, str) else params
         except (json.JSONDecodeError, TypeError):
             pass
-    result = await client.call("GET", path, params=parsed_params)
+
+    # Auto-inject fields param so account numbers/names are always returned
+    if parsed_params is None:
+        parsed_params = {}
+    if "/ledger/posting" in path and "fields" not in parsed_params:
+        parsed_params["fields"] = "id,date,description,account(id,number,name),amountGross,amountGrossCurrency,vatType(id),row,supplier(id,name),customer(id,name)"
+    if "/balanceSheet" in path and "fields" not in parsed_params:
+        parsed_params["fields"] = "account(id,number,name),balanceIn,balanceChange,balanceOut"
+
+    result = await client.call("GET", path, params=parsed_params if parsed_params else None)
     response = _truncate_response(result, path=path)
     ctx.context.get_cache[cache_key] = response
 
@@ -258,7 +309,7 @@ Args: path: API endpoint path. body: Request body as JSON string."""
         error_msg = json.dumps(result.get("data", {}), ensure_ascii=False).lower()
         log.log(f"  POST {path} -> {result['status']} ERR")
 
-        if "allerede" in error_msg or "i bruk" in error_msg or "already" in error_msg:
+        if result["status"] == 422 and ("allerede" in error_msg or "i bruk" in error_msg or "already" in error_msg):
             return f"Entity already exists. Use GET {path} to find it instead. Error: {_truncate_response(result, path=path)}"
 
         if "ugyldig mva-kode" in error_msg or "vattype" in error_msg:
@@ -267,16 +318,34 @@ Args: path: API endpoint path. body: Request body as JSON string."""
         if "arbeidsforhold" in error_msg and "/salary" in path:
             emp_id = _extract_employee_id(payload) if isinstance(payload, dict) else None
             if emp_id:
-                log.log(f"  AUTO: creating employment for employee {emp_id}")
-                await create_employment(client, emp_id)
+                # Use the salary period's first day as employment start (not TODAY)
+                year = payload.get("year", 2026)
+                month = payload.get("month", 1)
+                salary_start = f"{year}-{month:02d}-01"
+                log.log(f"  AUTO: creating employment for employee {emp_id} from {salary_start}")
+                await create_employment(client, emp_id, start_date=salary_start)
                 result = await client.call("POST", path, json_data=payload)
                 if result["status"] < 400:
                     log.log(f"  AUTO: salary retry succeeded")
                     return _truncate_response(result)
+                else:
+                    log.log(f"  AUTO: salary retry FAILED ({result['status']})")
+                    return f"Salary POST failed even after auto-creating employment (startDate={salary_start}). The employment may need a different startDate. RETRY the POST /salary/transaction call. Error: {_truncate_response(result, path=path)}"
 
         if "bankkontonummer" in error_msg or "bank account" in error_msg.lower():
             await ensure_bank_account(client)
             return f"Bank account registered. Please retry. Error: {_truncate_response(result)}"
+
+    # Auto-onboard after successful employee creation
+    if result["status"] < 400 and path.rstrip("/") == "/employee" and isinstance(payload, dict):
+        value = result.get("data", {}).get("value", {})
+        emp_id = value.get("id")
+        company_id = value.get("companyId")
+        # Try to extract startDate from the payload (LLM sometimes includes it)
+        start_date = payload.get("startDate")
+        if emp_id and company_id:
+            log.log(f"  AUTO-ONBOARD: employee={emp_id}, company={company_id}")
+            await auto_onboard_employee(client, emp_id, company_id, start_date, logger=log)
 
     return _truncate_response(result)
 
@@ -329,6 +398,16 @@ async def tripletex_delete(ctx: RunContextWrapper[TaskContext], path: str) -> st
     return _truncate_response(result)
 
 
+@function_tool
+async def lookup_occupation_code(ctx: RunContextWrapper[TaskContext], query: str) -> str:
+    """FALLBACK: Look up Norwegian STYRK-08 occupation codes from local file. Only use this if GET /employee/employment/occupationCode?nameNO=KEYWORD returns 403. Prefer the Tripletex API endpoint first — it returns the correct internal IDs.
+Args: query: A STYRK code number (e.g. "2511") or Norwegian job title keyword (e.g. "utvikler", "logistikk")."""
+    results = styrk_lookup(query)
+    if not results:
+        return f"No STYRK codes found for '{query}'. Try a shorter/broader keyword."
+    return json.dumps(results, ensure_ascii=False)
+
+
 # === Dynamic Instructions ===
 
 _system_prompt_cache = None
@@ -355,10 +434,12 @@ def dynamic_instructions(ctx: RunContextWrapper[TaskContext], agent: Agent) -> s
     turns = c.turn_count
 
     additions = []
-    if elapsed > 90:
-        additions.append(f"\n\nWARNING: {elapsed:.0f}s elapsed of 120s budget. FINISH NOW with what you have.")
+    if elapsed > 180:
+        additions.append(f"\n\nCRITICAL: {elapsed:.0f}s elapsed of 240s budget. STOP THINKING. Execute NOW with what you have.")
+    elif elapsed > 120:
+        additions.append(f"\n\nWARNING: {elapsed:.0f}s elapsed of 240s budget. Act NOW — post vouchers, register payments.")
     elif elapsed > 60:
-        additions.append(f"\n\nNOTE: {elapsed:.0f}s elapsed. Be efficient.")
+        additions.append(f"\n\nNOTE: {elapsed:.0f}s elapsed. Be efficient — act on the data you have.")
 
     if errors > 1 and turns > 3:
         additions.append(f"\n\nWARNING: {errors} errors after {turns} turns. Change strategy NOW. Do not retry the same failing approach.")
@@ -385,7 +466,7 @@ def create_agent() -> Agent[TaskContext]:
     gemini_client = AsyncOpenAI(
         api_key=api_key,
         base_url="https://generativelanguage.googleapis.com/v1beta/openai/",
-        timeout=90.0,  # 90s max per LLM call to prevent hanging
+        timeout=90.0,  # 90s max per LLM call
     )
 
     model = OpenAIChatCompletionsModel(
@@ -409,7 +490,7 @@ def create_agent() -> Agent[TaskContext]:
 
 # === Run agent ===
 
-async def run_agent(prompt: str, file_contents: list, tripletex_client: TripletexClient, req_id: str = "????") -> dict:
+async def run_agent(prompt: str, file_contents: list, tripletex_client: TripletexClient, req_id: str = "????", hooks=None) -> dict:
     """Run the agent using OpenAI Agents SDK."""
     global _system_prompt_cache
     _system_prompt_cache = None  # Reset per request so today's date is fresh
@@ -450,7 +531,7 @@ async def run_agent(prompt: str, file_contents: list, tripletex_client: Triplete
                 input=input_content,
                 context=task_ctx,
                 max_turns=30,
-                hooks=LoggingHooks(),
+                hooks=hooks or LoggingHooks(),
             ),
             timeout=240.0,  # Hard timeout: 4 minutes
         )

@@ -3,6 +3,28 @@ from datetime import date
 
 TODAY = date.today().isoformat()
 
+
+def _valid_norwegian_nin(nin: str) -> bool:
+    """Validate Norwegian fødselsnummer (11-digit NIN with checksums)."""
+    nin = ''.join(c for c in nin if c.isdigit())
+    if len(nin) != 11:
+        return False
+    d = [int(c) for c in nin]
+    # Check digit 1
+    w1 = [3, 7, 6, 1, 8, 9, 4, 5, 2]
+    r1 = 11 - (sum(a * b for a, b in zip(w1, d[:9])) % 11)
+    k1 = 0 if r1 == 11 else r1
+    if k1 == 10 or k1 != d[9]:
+        return False
+    # Check digit 2
+    w2 = [5, 4, 3, 2, 7, 6, 5, 4, 3, 2]
+    r2 = 11 - (sum(a * b for a, b in zip(w2, d[:10])) % 11)
+    k2 = 0 if r2 == 11 else r2
+    if k2 == 10 or k2 != d[10]:
+        return False
+    return True
+
+
 # Bank account setup state
 _bank_account_registered = False
 
@@ -17,7 +39,11 @@ def apply_fixes(path: str, method: str, payload) -> dict:
         payload.setdefault("date", TODAY)
         for i, p in enumerate(payload["postings"]):
             p["row"] = i + 1
-            amt = p.get("amountGross") or p.get("amount") or p.get("amountGrossCurrency")
+            amt = p.get("amountGross")
+            if amt is None:
+                amt = p.get("amount")
+            if amt is None:
+                amt = p.get("amountGrossCurrency")
             if amt is not None:
                 p["amountGross"] = amt
                 p["amountGrossCurrency"] = amt
@@ -45,9 +71,10 @@ def apply_fixes(path: str, method: str, payload) -> dict:
         if isinstance(vt, dict):
             vat_id = vt.get("id")
         if price_ex is not None and "priceIncludingVatCurrency" not in payload:
-            rates = {3: 0.25, 31: 0.15, 32: 0.12, 5: 0.0, 6: 0.0}
-            rate = rates.get(vat_id, 0.25)
-            payload["priceIncludingVatCurrency"] = round(price_ex * (1 + rate), 2)
+            rates = {3: 0.25, 31: 0.15, 32: 0.12, 5: 0.0, 6: 0.0, 1: 0.25, 11: 0.15}
+            if vat_id is not None and vat_id in rates:
+                rate = rates[vat_id]
+                payload["priceIncludingVatCurrency"] = round(price_ex * (1 + rate), 2)
 
     # === SALARY FIXES ===
     if "/salary/transaction" in path:
@@ -73,7 +100,10 @@ def apply_fixes(path: str, method: str, payload) -> dict:
     if "/activity" in path and method == "POST":
         if payload.get("activityType") == "PROJECT_SPECIFIC":
             payload["activityType"] = "PROJECT_SPECIFIC_ACTIVITY"
-        payload.setdefault("activityType", "PROJECT_GENERAL_ACTIVITY")
+        if "/project/projectActivity" in path:
+            payload.setdefault("activityType", "PROJECT_SPECIFIC_ACTIVITY")
+        else:
+            payload.setdefault("activityType", "PROJECT_GENERAL_ACTIVITY")
 
     # === PROJECT FIXES ===
     if path.rstrip("/") == "/project" and method == "POST":
@@ -82,17 +112,27 @@ def apply_fixes(path: str, method: str, payload) -> dict:
     # === EMPLOYEE FIXES ===
     if path.rstrip("/") == "/employee" and method == "POST":
         payload.setdefault("userType", "EXTENDED")
+        # Validate Norwegian NIN (fødselsnummer) — strip invalid ones to avoid 422
+        nin = payload.get("nationalIdentityNumber")
+        if nin is not None and not _valid_norwegian_nin(str(nin)):
+            payload.pop("nationalIdentityNumber")
         for emp in payload.get("employments", []):
             emp.setdefault("isMainEmployer", True)
             emp.setdefault("startDate", TODAY)
 
     # === EMPLOYMENT DETAILS FIXES ===
+    # Only add enum defaults when LLM is doing a full employment setup (has salary or percentage)
     if "/employee/employment/details" in path and method == "POST":
-        payload.setdefault("employmentType", "ORDINARY")
-        payload.setdefault("employmentForm", "PERMANENT")
-        payload.setdefault("remunerationType", "MONTHLY_WAGE")
-        payload.setdefault("workingHoursScheme", "NOT_SHIFT")
-        payload.pop("occupationCode", None)  # [BETA] endpoint — always strip
+        if payload.get("annualSalary") or payload.get("percentageOfFullTimeEquivalent"):
+            payload.setdefault("employmentType", "ORDINARY")
+            payload.setdefault("employmentForm", "PERMANENT")
+            payload.setdefault("remunerationType", "MONTHLY_WAGE")
+            payload.setdefault("workingHoursScheme", "NOT_SHIFT")
+        # occupationCode is allowed — the GET endpoint works in competition
+
+    # === SUPPLIER INVOICE FIXES ===
+    if "/supplierInvoice" in path and method == "POST":
+        payload.pop("dueDate", None)  # dueDate doesn't exist on supplierInvoice
 
     # === TRAVEL EXPENSE COST FIXES ===
     if "/travelExpense/cost" in path and method == "POST":
@@ -100,6 +140,9 @@ def apply_fixes(path: str, method: str, payload) -> dict:
         amt = payload.pop("amount", None)
         if amt is not None and "amountCurrencyIncVat" not in payload:
             payload["amountCurrencyIncVat"] = amt
+        # Normalize description field name (competition scores this)
+        if "name" in payload and "description" not in payload:
+            payload["description"] = payload.pop("name")
 
     # === TRAVEL EXPENSE PER DIEM FIXES ===
     if "/travelExpense/perDiemCompensation" in path and method == "POST":
@@ -146,7 +189,38 @@ async def ensure_bank_account(client):
         raise  # Re-raise so ProxyTokenExpiredError propagates
 
 
-async def create_employment(client, employee_id: int):
+async def auto_onboard_employee(client, employee_id: int, company_id: int, start_date: str = None, logger=None):
+    """Automatically execute post-employee-creation steps: entitlement + employment.
+    Called after POST /employee succeeds. The LLM still handles department and employment/details."""
+    log = logger.log if logger else lambda msg: print(f"[ONBOARD] {msg}", file=sys.stderr)
+
+    # Step 1: Grant ALL_PRIVILEGES via the BETA endpoint (confirmed working on competition sandboxes)
+    try:
+        ent_result = await client.call(
+            "PUT",
+            "/employee/entitlement/:grantEntitlementsByTemplate",
+            params={"employeeId": employee_id, "template": "ALL_PRIVILEGES"},
+        )
+        if ent_result["status"] < 400:
+            log(f"  AUTO: ALL_PRIVILEGES granted for employee {employee_id}")
+        elif ent_result["status"] == 403:
+            # Fallback: if BETA is blocked, use POST /employee/entitlement for ROLE_ADMINISTRATOR only
+            log(f"  AUTO: BETA 403, falling back to POST /employee/entitlement")
+            await client.call("POST", "/employee/entitlement", json_data={
+                "employee": {"id": employee_id},
+                "customer": {"id": company_id},
+                "entitlementId": 1,
+            })
+        else:
+            log(f"  AUTO: entitlement failed ({ent_result['status']})")
+    except Exception as e:
+        log(f"  AUTO: entitlement error: {e}")
+
+    # Employment creation removed — the LLM handles this since it knows the correct
+    # startDate from the prompt/PDF. Auto-creating with TODAY caused 409 conflicts.
+
+
+async def create_employment(client, employee_id: int, start_date: str | None = None):
     # Ensure employee has dateOfBirth (required for employment)
     try:
         emp_result = await client.call("GET", f"/employee/{employee_id}")
@@ -161,13 +235,14 @@ async def create_employment(client, employee_id: int):
     # First check if a division exists, create one if needed
     division_id = await _ensure_division(client)
 
+    effective_date = start_date or TODAY
     payload = {
         "employee": {"id": employee_id},
-        "startDate": TODAY,
+        "startDate": effective_date,
         "isMainEmployer": True,
         "employmentDetails": [
             {
-                "date": TODAY,
+                "date": effective_date,
                 "employmentType": "ORDINARY",
                 "employmentForm": "PERMANENT",
                 "remunerationType": "MONTHLY_WAGE",

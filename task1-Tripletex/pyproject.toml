@@ -13,3 +13,6 @@ dependencies = [
     "openpyxl",
     "pdfplumber>=0.11.9",
 ]
+
+[project.optional-dependencies]
+eval = ["deepeval>=2.0"]
