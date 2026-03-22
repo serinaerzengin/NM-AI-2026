@@ -33,7 +33,7 @@ async def solve(request: Request):
         files = body.get("files", [])
 
         # Log prompt for task identification
-        prompt_preview = prompt[:300].replace('\n', ' ')
+        prompt_preview = prompt[:800].replace('\n', ' ')
         print(f"[{req_id}][SOLVE] START prompt={prompt_preview}", file=sys.stderr)
 
         # Handle both credential formats

@@ -28,9 +28,9 @@ async def process_files(files: list) -> list:
                         text += " | ".join(str(c) for c in row) + "\n"
                     if len(rows) > 200:
                         text += f"... ({len(rows) - 200} more rows)\n"
-                    parts.append({"type": "text", "text": text})
+                    parts.append({"type": "input_text", "text": text})
             except Exception as e:
-                parts.append({"type": "text", "text": f"Error reading CSV {filename}: {e}"})
+                parts.append({"type": "input_text", "text": f"Error reading CSV {filename}: {e}"})
 
         elif lower.endswith(".xlsx") or lower.endswith(".xls"):
             try:
@@ -47,25 +47,52 @@ async def process_files(files: list) -> list:
                             break
                         text += " | ".join(str(c) if c is not None else "" for c in row) + "\n"
                 wb.close()
-                parts.append({"type": "text", "text": text})
+                parts.append({"type": "input_text", "text": text})
             except Exception as e:
-                parts.append({"type": "text", "text": f"Error reading Excel {filename}: {e}"})
+                parts.append({"type": "input_text", "text": f"Error reading Excel {filename}: {e}"})
 
         elif mime_type.startswith("image/") or lower.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp")):
             data_url = f"data:{mime_type};base64,{content_b64}"
-            parts.append({"type": "image_url", "image_url": {"url": data_url}})
+            parts.append({"type": "input_image", "image_url": data_url})
 
         elif lower.endswith(".pdf") or mime_type == "application/pdf":
-            # Send PDF as image for Gemini vision
-            data_url = f"data:application/pdf;base64,{content_b64}"
-            parts.append({"type": "image_url", "image_url": {"url": data_url}})
+            try:
+                import pdfplumber
+                raw = base64.b64decode(content_b64)
+                with pdfplumber.open(io.BytesIO(raw)) as pdf:
+                    text = f"=== PDF File: {filename} ===\n"
+                    has_text = False
+                    for i, page in enumerate(pdf.pages[:20]):
+                        page_text = page.extract_text() or ""
+                        if page_text.strip():
+                            has_text = True
+                        text += f"--- Page {i+1} ---\n{page_text}\n"
+
+                if has_text:
+                    parts.append({"type": "input_text", "text": text})
+                else:
+                    # Scanned PDF — convert pages to images
+                    import pypdfium2
+                    pdf_doc = pypdfium2.PdfDocument(io.BytesIO(raw))
+                    for i, page in enumerate(pdf_doc):
+                        if i >= 5:
+                            break
+                        bitmap = page.render(scale=2)
+                        pil_image = bitmap.to_pil()
+                        img_buf = io.BytesIO()
+                        pil_image.save(img_buf, format="PNG")
+                        img_b64 = base64.b64encode(img_buf.getvalue()).decode()
+                        parts.append({"type": "input_image", "image_url": f"data:image/png;base64,{img_b64}"})
+                    pdf_doc.close()
+            except Exception as e:
+                parts.append({"type": "input_text", "text": f"[PDF file: {filename}, could not extract text: {e}]"})
 
         else:
             # Try as text
             try:
                 raw = base64.b64decode(content_b64).decode("utf-8", errors="replace")
-                parts.append({"type": "text", "text": f"=== File: {filename} ===\n{raw[:5000]}"})
+                parts.append({"type": "input_text", "text": f"=== File: {filename} ===\n{raw[:5000]}"})
             except Exception:
-                parts.append({"type": "text", "text": f"[Binary file: {filename}, cannot display]"})
+                parts.append({"type": "input_text", "text": f"[Binary file: {filename}, cannot display]"})
 
     return parts

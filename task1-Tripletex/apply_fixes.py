@@ -7,8 +7,8 @@ TODAY = date.today().isoformat()
 _bank_account_registered = False
 
 
-def apply_fixes(path: str, method: str, payload: dict) -> dict:
-    if payload is None:
+def apply_fixes(path: str, method: str, payload) -> dict:
+    if payload is None or not isinstance(payload, dict):
         return payload
 
     # === VOUCHER FIXES ===
@@ -22,6 +22,13 @@ def apply_fixes(path: str, method: str, payload: dict) -> dict:
                 p["amountGross"] = amt
                 p["amountGrossCurrency"] = amt
                 p.pop("amount", None)
+            # Fix dimension field names → freeAccountingDimension1/2
+            for wrong in ("dimension1", "accountingDimension1", "customDimension1"):
+                if wrong in p and "freeAccountingDimension1" not in p:
+                    p["freeAccountingDimension1"] = p.pop(wrong)
+            for wrong in ("dimension2", "accountingDimension2", "customDimension2"):
+                if wrong in p and "freeAccountingDimension2" not in p:
+                    p["freeAccountingDimension2"] = p.pop(wrong)
 
     # === ORDER FIXES ===
     if "/order" in path and method == "POST":
@@ -68,11 +75,35 @@ def apply_fixes(path: str, method: str, payload: dict) -> dict:
             payload["activityType"] = "PROJECT_SPECIFIC_ACTIVITY"
         payload.setdefault("activityType", "PROJECT_GENERAL_ACTIVITY")
 
+    # === PROJECT FIXES ===
+    if path.rstrip("/") == "/project" and method == "POST":
+        payload.setdefault("startDate", TODAY)
+
     # === EMPLOYEE FIXES ===
     if path.rstrip("/") == "/employee" and method == "POST":
+        payload.setdefault("userType", "EXTENDED")
         for emp in payload.get("employments", []):
             emp.setdefault("isMainEmployer", True)
             emp.setdefault("startDate", TODAY)
+
+    # === EMPLOYMENT DETAILS FIXES ===
+    if "/employee/employment/details" in path and method == "POST":
+        payload.setdefault("employmentType", "ORDINARY")
+        payload.setdefault("employmentForm", "PERMANENT")
+        payload.setdefault("remunerationType", "MONTHLY_WAGE")
+        payload.setdefault("workingHoursScheme", "NOT_SHIFT")
+        payload.pop("occupationCode", None)  # [BETA] endpoint — always strip
+
+    # === TRAVEL EXPENSE COST FIXES ===
+    if "/travelExpense/cost" in path and method == "POST":
+        # amountCurrencyIncVat is the correct field, not amount
+        amt = payload.pop("amount", None)
+        if amt is not None and "amountCurrencyIncVat" not in payload:
+            payload["amountCurrencyIncVat"] = amt
+
+    # === TRAVEL EXPENSE PER DIEM FIXES ===
+    if "/travelExpense/perDiemCompensation" in path and method == "POST":
+        payload.setdefault("location", "DOMESTIC")
 
     # === ACCOUNTING DIMENSION FIXES ===
     if "/accountingDimensionName" in path and method == "POST":
@@ -99,11 +130,20 @@ async def ensure_bank_account(client):
             acc_id = account.get("id")
             if acc_id and not account.get("bankAccountNumber"):
                 account["bankAccountNumber"] = "12345678903"
-                await client.call("PUT", f"/ledger/account/{acc_id}", json_data=account)
-                print("[SETUP] Bank account registered on 1920", file=sys.stderr)
-        _bank_account_registered = True
+                put_result = await client.call("PUT", f"/ledger/account/{acc_id}", json_data=account)
+                if put_result["status"] < 400:
+                    print("[SETUP] Bank account registered on 1920", file=sys.stderr)
+                    _bank_account_registered = True
+                else:
+                    print(f"[SETUP] Bank account PUT failed: {put_result['status']}", file=sys.stderr)
+            else:
+                # Already has bank account number
+                _bank_account_registered = True
+        else:
+            print("[SETUP] Account 1920 not found", file=sys.stderr)
     except Exception as e:
         print(f"[SETUP ERROR] Bank account: {e}", file=sys.stderr)
+        raise  # Re-raise so ProxyTokenExpiredError propagates
 
 
 async def create_employment(client, employee_id: int):

@@ -3,6 +3,11 @@ import sys
 import json
 
 
+class ProxyTokenExpiredError(Exception):
+    """Raised when the proxy token is invalid/expired — entire run is dead."""
+    pass
+
+
 class TripletexClient:
     def __init__(self, base_url: str, session_token: str, req_id: str = "????"):
         # Strip trailing /v2 if present — we add it in call()
@@ -28,15 +33,23 @@ class TripletexClient:
             )
             if response.status_code >= 400:
                 self.error_count += 1
+                resp_text = response.text[:500]
                 print(
-                    f"[{self.req_id}][API {response.status_code}] {method} {path}: {response.text[:500]}",
+                    f"[{self.req_id}][API {response.status_code}] {method} {path}: {resp_text}",
                     file=sys.stderr,
                 )
+                # Fatal: expired proxy token means entire run is dead
+                if response.status_code == 403 and "expired proxy token" in resp_text.lower():
+                    raise ProxyTokenExpiredError(
+                        f"Proxy token expired — aborting run. All further API calls will fail."
+                    )
             try:
                 data = response.json()
             except Exception:
                 data = {"raw": response.text[:2000]}
             return {"status": response.status_code, "data": data}
+        except ProxyTokenExpiredError:
+            raise  # Must propagate to abort the agent loop
         except httpx.TimeoutException:
             self.error_count += 1
             print(f"[{self.req_id}][TIMEOUT] {method} {path}", file=sys.stderr)

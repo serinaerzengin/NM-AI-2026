@@ -9,5 +9,7 @@ dependencies = [
     "httpx",
     "python-dotenv",
     "openai",
+    "openai-agents",
     "openpyxl",
+    "pdfplumber>=0.11.9",
 ]
